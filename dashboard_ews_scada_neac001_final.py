@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import hmac
 import html
