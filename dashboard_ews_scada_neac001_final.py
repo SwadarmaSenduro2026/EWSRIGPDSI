@@ -2453,10 +2453,12 @@ with st.sidebar:
 # Semua bagian dibuat SELALU dengan urutan tetap. Isinya boleh berubah tiap detik,
 # tetapi jumlah elemen tingkat atas tidak, sehingga grafik dan tabel tidak dibuat ulang.
 view = st.radio(
-    "Tampilan", ["Kabin Driller", "Dasbor EWS"], horizontal=True,
+    "Tampilan", ["Kabin Driller", "Dasbor EWS", "Dasbor Fuzzy-PID"], horizontal=True,
     key="view_mode", label_visibility="collapsed",
 )
-cabin_view = view == "Kabin Driller"
+is_cabin = view == "Kabin Driller"
+is_ews = view == "Dasbor EWS"
+is_fuzzy = view == "Dasbor Fuzzy-PID"
 
 sec_status = st.container()
 sec_ack = st.container()
@@ -2600,7 +2602,7 @@ with sec_alerts:
 # ==========================================================
 # TAMPILAN KABIN DRILLER
 # ==========================================================
-if cabin_view:
+if is_cabin:
     ap_last = None
     if ap_view:
         hist_c = ap_view["hist"]
@@ -2802,7 +2804,7 @@ if cabin_view:
 # ==========================================================
 # TAMPILAN DASBOR EWS
 # ==========================================================
-if not cabin_view:
+if is_ews:
     # ---- kartu parameter ----
     with sec_cards:
         cards = []
@@ -2835,6 +2837,210 @@ if not cabin_view:
             + _h('<div class="grid-cards">' + "".join(cards) + "</div>"),
             unsafe_allow_html=True,
         )
+
+    # ---- legenda ----
+    with sec_legend:
+        legend_items = "".join(
+            f'<div class="legend-item lv{number}"><b>{LEVELS[number]["name"]}</b>'
+            f'<span>{LEVELS[number]["description"]}</span></div>'
+            for number in range(4)
+        )
+        st.markdown(
+            '<div class="section-title">Keterangan level</div>'
+            + _h(f'<div class="grid-legend">{legend_items}</div>'),
+            unsafe_allow_html=True,
+        )
+
+    # ---- grafik tren parameter ----
+    with sec_trend:
+        st.markdown('<div class="section-title">Grafik tren parameter</div>', unsafe_allow_html=True)
+        st.caption(
+            "Grafik menampilkan maksimal 120 sampel terbaru. Gambar dibuat satu kali per langkah "
+            "data dan dipakai bersama semua perangkat, sehingga tidak berkedip."
+        )
+        selected = st.multiselect(
+            "Pilih parameter yang ditampilkan (lebih sedikit grafik = lebih ringan)",
+            PARAMETERS,
+            default=["ROP", "StandpipePressure"],
+            format_func=lambda x: DISPLAY_NAME.get(x, x),
+            key="trend_selected",
+        )
+        trend_columns = st.columns(2)
+        plot_data = visible.tail(120)
+        use_depth = has_depth and "Depth_m" in plot_data.columns and bool(plot_data["Depth_m"].notna().all())
+        x_values = plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
+        x_label = "Kedalaman TMD (m)" if use_depth else "Waktu"
+        for position, parameter in enumerate(selected):
+            png = render_trend_png(
+                (parameter, int(index), scenario, len(plot_data), x_label),
+                THEME_NAME, parameter, THRESHOLDS[parameter], x_label,
+                x_values, plot_data[parameter],
+            )
+            show_image(trend_columns[position % 2], png)
+
+
+# ==========================================================
+# TAMPILAN DASBOR KHUSUS FUZZY-PID
+# ==========================================================
+if is_fuzzy:
+    with sec_ap:
+        st.markdown(
+            '<div class="section-title" style="font-size: 16px; color: var(--accent);">Dasbor Khusus: Analisis Auto Pilot Fuzzy-PID</div>',
+            unsafe_allow_html=True,
+        )
+        slot_mode = st.empty()
+        slot_cards = st.empty()
+        slot_brake = st.empty()
+        slot_check = st.empty()
+        slot_chart = st.empty()
+        slot_caption = st.empty()
+        slot_kpi = st.empty()
+        slot_gain = st.empty()
+
+        show_raw = slot_check.checkbox(
+            "Tampilkan data mentah rig (garis samar)", value=True, key="ap_show_raw"
+        )
+        if ap_on:
+            slot_mode.markdown(
+                notice(
+                    "Mode auto pilot <b>AKTIF</b>. Data rig diakuisisi dan diproses pengendali "
+                    "Fuzzy-PID; hasil yang telah dihaluskan tampil pada grafik di bawah."
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            slot_mode.markdown(
+                notice(
+                    "Mode auto pilot <b>nonaktif</b>. "
+                    + ("Menampilkan hasil terakhir. " if ap_view else "")
+                    + "Admin dapat mengaktifkannya melalui sidebar."
+                ),
+                unsafe_allow_html=True,
+            )
+
+        if ap_view:
+            hist = ap_view["hist"]
+
+            def series(key):
+                return np.array(hist[key], dtype=float)
+
+            brake = float(ap_view["brake"])
+            boost = float(ap_view["boost"])
+            brake_css, brake_text = brake_style(brake)
+            recent = slice(-30, None)
+            rop_ap = float(np.mean(series("ap_ROP")[recent]))
+            rop_raw = float(np.mean(series("raw_ROP")[recent]))
+            rop_gain = (rop_ap / rop_raw - 1.0) * 100.0 if rop_raw > 0 else 0.0
+
+            # 1. KARTU HASIL OUTPUT KONTROL
+            ap_cards = [
+                ap_card_html("Perintah WOB", _num(hist["wob_cmd"][-1], 1), "kN",
+                             "lv1" if boost >= 0.01 else "lv0",
+                             f"Booster +{boost * 100:.0f}%" if boost >= 0.01 else "Stabil"),
+                ap_card_html("Perintah RPM", _num(hist["rpm_cmd"][-1], 1), "rpm",
+                             brake_css, "Direm" if brake >= 0.10 else "Normal"),
+                ap_card_html("Pengereman", f"{brake * 100:.0f}", "%", brake_css, brake_text),
+                ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
+                             "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
+            ]
+            slot_cards.markdown(
+                _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
+                unsafe_allow_html=True,
+            )
+            
+            # 2. KARTU INPUT FUZZY (Indikator Tambahan Khusus Dasbor Ini)
+            fuzzy_input_cards = [
+                ap_card_html("Input Fuzzy: Torsi", f"{ap_view['rise_t']:+.1f}", "%", "lv1" if ap_view['rise_t'] > 10 else "lv0", "Kenaikan vs Baseline"),
+                ap_card_html("Input Fuzzy: SPP", f"{ap_view['rise_p']:+.1f}", "%", "lv1" if ap_view['rise_p'] > 10 else "lv0", "Kenaikan vs Baseline"),
+            ]
+            st.markdown(
+                _h('<div class="grid-cards four" style="margin-top:10px; margin-bottom:10px;">' + "".join(fuzzy_input_cards) + "</div>"),
+                unsafe_allow_html=True,
+            )
+
+            if brake >= 0.10:
+                slot_brake.markdown(
+                    notice(
+                        f"<b>Pengereman putaran aktif ({brake * 100:.0f}%).</b> Torsi "
+                        f"{ap_view['rise_t']:+.0f}% dan standpipe pressure {ap_view['rise_p']:+.0f}% "
+                        "terhadap baseline. RPM dan WOB diturunkan otomatis.",
+                        "err" if brake >= 0.40 else "warn",
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+            # 3. GRAFIK DUAL-PLOT (CO-SIMULATION)
+            nominal = {
+                "ROP": float(params["ap_rop_target"]),
+                "WOB": float(params["ap_wob_sp"]),
+                "RPM": float(params["ap_rpm_sp"]),
+                "Torque": float(ap_view["nom"]["Torque"]),
+                "StandpipePressure": float(ap_view["nom"]["StandpipePressure"]),
+            }
+            depth_arr = series("depth")
+            ap_x_label = "Kedalaman TMD (m)" if np.all(np.isfinite(depth_arr)) else "Waktu"
+            ap_key = (
+                int(ap_view["uid"]), len(hist["t"]), int(hist["idx"][-1]),
+                bool(show_raw), ap_x_label,
+            )
+            png = render_ap_png(ap_key, THEME_NAME, bool(show_raw), nominal, ap_x_label, hist)
+            show_image(slot_chart, png)
+
+            slot_caption.caption(
+                "100% adalah nilai acuan: setpoint auto pilot untuk WOB, RPM, dan ROP, serta "
+                "baseline awal untuk torsi dan standpipe pressure. Area merah menandai saat "
+                "pengereman putaran aktif."
+            )
+
+            # 4. TABEL KPI PERFORMA
+            kpi_rows = [
+                {"Indikator": "Fluktuasi WOB (rata-rata perubahan per langkah, kN)",
+                 "Data mentah": f"{_mean_abs_change(series('raw_WOB')):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(series('ap_WOB')):.2f}"},
+                {"Indikator": "Fluktuasi ROP (rata-rata perubahan per langkah, m/h)",
+                 "Data mentah": f"{_mean_abs_change(series('raw_ROP')):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(series('ap_ROP')):.2f}"},
+                {"Indikator": "ROP rata-rata (m/h)",
+                 "Data mentah": f"{np.mean(series('raw_ROP')):.2f}",
+                 "Auto pilot": f"{np.mean(series('ap_ROP')):.2f}"},
+                {"Indikator": "Torsi puncak (kN.m)",
+                 "Data mentah": f"{np.max(series('raw_Torque')):.2f}",
+                 "Auto pilot": f"{np.max(series('ap_Torque')):.2f}"},
+                {"Indikator": "Standpipe pressure puncak (psi)",
+                 "Data mentah": f"{np.max(series('raw_StandpipePressure')):,.0f}",
+                 "Auto pilot": f"{np.max(series('ap_StandpipePressure')):,.0f}"},
+                {"Indikator": "RPM rata-rata",
+                 "Data mentah": f"{np.mean(series('raw_RPM')):.1f}",
+                 "Auto pilot": f"{np.mean(series('ap_RPM')):.1f}"},
+                {"Indikator": "Langkah dengan pengereman aktif (>10%)",
+                 "Data mentah": "-",
+                 "Auto pilot": f"{int(np.sum(series('brake') > 0.10))}"},
+            ]
+            slot_kpi.markdown(
+                '<div class="section-title">Ringkasan Kinerja Auto Pilot (Mitigasi NPT)</div>'
+                + html_table(kpi_rows, ["Indikator", "Data mentah", "Auto pilot"])
+                + _h(f'<div class="view-note">Dihitung dari {len(hist["t"])} sampel yang telah diproses sejak '
+                     "mode auto pilot diaktifkan.</div>"),
+                unsafe_allow_html=True,
+            )
+
+            # 5. TABEL PERUBAHAN GAIN FUZZY (Nilai Tuning Otomatis)
+            gain_rows = [
+                {
+                    "Kanal": f"{DISPLAY_NAME.get(name, name)} ({UNITS[name]})",
+                    "Kp": f"{ap_view['gains'][name][0]:.3f}",
+                    "Ki": f"{ap_view['gains'][name][1]:.4f}",
+                    "Kd": f"{ap_view['gains'][name][2]:.3f}",
+                }
+                for name in AP_CHANNEL_LIST
+            ]
+            slot_gain.markdown(
+                '<div class="section-title">Logika Fuzzy: Nilai Tuning Kp, Ki, Kd Saat Ini</div>'
+                + html_table(gain_rows, ["Kanal", "Kp", "Ki", "Kd"])
+                + '<div class="view-note">Gain dasar tiap kanal terus disesuaikan oleh logika fuzzy '
+                  "berdasarkan besar error dan delta-error di setiap siklus.</div>",
+                unsafe_allow_html=True,
+            )
 
     # ---- auto pilot ----
     with sec_ap:
