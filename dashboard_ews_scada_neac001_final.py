@@ -2889,21 +2889,27 @@ if is_setup:
 
 if is_cabin or is_ews or is_fuzzy:
     st.markdown("### Ringkasan penelitian formasi")
-    a,b = st.columns(2)
-    a.metric("Profil hipotetis", formation_now or "Tanpa label")
-    b.metric("Indikator telemetri", formation_signal["status"])
+    left, right = st.columns([1, 2])
+    left.metric("Profil hipotetis", formation_now or "Tanpa label")
+    with right:
+        # st.metric memotong teks panjang. Markdown membungkus status dengan aman.
+        st.markdown("**Indikator telemetri**")
+        st.markdown(f"**{formation_signal['status']}**")
     st.caption("Label profil adalah konstruksi eksperimen, bukan hasil sensor. Indikator telemetri berbasis perubahan ROP ternormalisasi, WOB, RPM, dan torsi; belum tervalidasi sebagai jenis batuan.")
 
 if is_formation:
     st.subheader("05 · Skenario formasi lunak–sedang–keras")
     st.warning("LABEL SKENARIO ≠ LITOLOGI NYATA. Zona dibuat menurut persentase indeks playback, bukan hasil logging/UCS. Skenario ini hanya memengaruhi label HMI dan unduhan CSV; tidak memodifikasi dataset, alarm, atau pengendali Fuzzy-PID.")
-    a,b,c = st.columns(3)
+    a, c = st.columns(2)
     a.metric("Zona ilustratif saat ini", formation_now or "Tidak dipilih")
-    b.metric("Indikasi telemetry", formation_signal["status"])
     c.metric("Sampel", f"{index+1}/{n}")
+    # Status telemetri sering memuat banyak kata; jangan gunakan st.metric di kolom sempit.
+    # Panel satu baris penuh membungkus teks tanpa ellipsis/terpotong pada layar berbeda.
+    st.markdown("**Indikasi telemetri**")
+    st.info(formation_signal["status"])
+    st.caption(formation_signal["reason"])
     st.markdown("**Dua pendekatan yang dibedakan**")
     st.write("(1) Profil simulasi: lunak → sedang → keras sebagai *ground truth buatan* untuk percobaan berikutnya. (2) Bukti telemetri: perubahan efisiensi ROP relatif dengan memeriksa stabilitas WOB/RPM dan torsi per WOB.")
-    st.caption(formation_signal["reason"])
     metr = st.columns(4)
     for target, label, k in zip(metr, ["ROP norm", "Torque/WOB", "RPM", "WOB"],
                                 ["eff_ratio", "torque_ratio", "rpm_ratio", "wob_ratio"]):
