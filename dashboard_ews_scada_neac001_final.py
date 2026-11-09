@@ -1719,6 +1719,42 @@ def formation_indicator_frame(source, index, lookback=12):
     return pd.DataFrame(rows)
 
 
+
+def formation_depth_trend(source, index, window=120):
+    """Siapkan telemetri untuk grafik. Sumbu X kedalaman hanya jika valid/terurut.
+
+    Tidak mengubah dataframe sumber, nilai EWS, atau model kendali Fuzzy-PID.
+    Saat data sintetis tidak menyediakan Depth_m, gunakan indeks sampel.
+    """
+    end = max(0, min(int(index) + 1, len(source)))
+    start = max(0, end - max(1, int(window)))
+    cols = ["ROP", "WOB", "RPM", "Torque"]
+    if end == 0:
+        return pd.DataFrame(columns=["Sampel", *cols]), "Sampel"
+    frame = source.iloc[start:end][cols].apply(pd.to_numeric, errors="coerce").copy()
+    frame = frame.replace([np.inf, -np.inf], np.nan)
+    frame.insert(0, "Sampel", np.arange(start + 1, end + 1))
+    axis = "Sampel"
+    if "Depth_m" in source.columns:
+        depth = pd.to_numeric(source.iloc[start:end]["Depth_m"], errors="coerce").to_numpy(dtype=float)
+        if np.isfinite(depth).all() and (len(depth) < 2 or np.all(np.diff(depth) > 0)):
+            axis = "Kedalaman TMD (m)"
+            frame.insert(0, axis, depth)
+    return frame.reset_index(drop=True), axis
+
+
+def formation_profile_trend(schedule, index):
+    """Kurva skenario hipotetis, terpisah dari tren telemetri observasi."""
+    end = max(0, min(int(index) + 1, len(schedule)))
+    if end == 0:
+        return pd.DataFrame(), "Baris"
+    frame = schedule.iloc[:end][["Baris", "Depth_m", "Drillability_relatif"]].copy()
+    depth = pd.to_numeric(frame["Depth_m"], errors="coerce").to_numpy(dtype=float)
+    if np.isfinite(depth).all() and (len(depth) < 2 or np.all(np.diff(depth) > 0)):
+        return frame.rename(columns={"Depth_m": "Kedalaman TMD (m)"}), "Kedalaman TMD (m)"
+    return frame, "Baris"
+
+
 @st.cache_data(show_spinner=False, max_entries=8)
 def cached_formation_indicators(source, lookback=12):
     """Hitung sekali untuk seluruh dataset; UI hanya memotong indeks playback."""
@@ -2922,16 +2958,41 @@ if is_formation:
                                 ["Baris", "Depth_m", "Zona_skenario", "Drillability_relatif"]]
         st.markdown("**Transisi zona skenario**")
         call_wide(st.dataframe, segments.reset_index(drop=True), hide_index=True)
+        st.markdown("**Lintasan zona batuan HIPOTETIS sampai sampel saat ini**")
+        profile_trend, profile_axis = formation_profile_trend(schedule, index)
+        if not profile_trend.empty:
+            call_wide(st.line_chart, profile_trend, x=profile_axis,
+                      y="Drillability_relatif", height=200)
+        st.caption("Tingkat 1,00 = lunak; 0,70 = sedang; 0,45 = keras. "
+                   "Kurva ini DITETAPKAN dari skenario, BUKAN hasil pengukuran litologi/UCS, "
+                   "dan tidak memengaruhi setpoint WOB pada fase ini.")
         st.download_button("Unduh skenario hipotetis CSV", schedule.to_csv(index=False).encode("utf-8-sig"),
                            "profil_formasi_hipotetis.csv", "text/csv", key="formation_schedule_download")
-    st.markdown("**Cuplikan telemetri asli (grafik per parameter)**")
-    chart = simulation_data.iloc[max(0,index-119):index+1][["ROP", "WOB", "RPM", "Torque"]]
-    cells = st.columns(2)
-    for pos, (column, unit) in enumerate((("ROP", "m/h"), ("WOB", "kN"),
-                                         ("RPM", "rpm"), ("Torque", "kN.m"))):
-        cells[pos % 2].caption(f"{column} ({unit})")
-        call_wide(cells[pos % 2].line_chart, chart[[column]])
-    st.caption("Setiap grafik memiliki skala sendiri. Interpretasi formasi harus didukung data litologi/UCS dan evaluasi parameter operasi.")
+    st.markdown("**Tren telemetri asli mengikuti kedalaman / indeks playback**")
+    chart, chart_axis = formation_depth_trend(simulation_data, index, window=120)
+    if not chart.empty:
+        st.caption(f"Sumbu X: {chart_axis}. Menampilkan {len(chart)} sampel terakhir "
+                   f"hingga sampel {index+1}/{n}. "
+                   "Data mentah tidak diubah oleh profil formasi hipotetis.")
+        cells = st.columns(2)
+        for pos, (column, unit) in enumerate((("ROP", "m/h"), ("WOB", "kN"),
+                                             ("RPM", "rpm"), ("Torque", "kN.m"))):
+            cells[pos % 2].caption(f"{column} ({unit})")
+            call_wide(cells[pos % 2].line_chart, chart, x=chart_axis,
+                      y=column, height=230)
+    else:
+        st.info("Belum ada sampel untuk dibuat grafik.")
+    st.caption("Setiap parameter memiliki skala tersendiri. Penurunan ROP saat WOB/RPM "
+               "relatif stabil dapat menjadi indikasi meningkatnya resistansi, "
+               "namun diperlukan informasi litologi, kondisi bit, dan hidraulika.")
+    if st.checkbox("Tampilkan histori indikator resistansi relatif (eksploratif)",
+                   key="formation_show_evidence_curve", value=False):
+        indicators = cached_formation_indicators(simulation_data).iloc[:index+1].tail(120)
+        st.caption("Rasio dibanding dua jendela, bukan sifat fisik batuan. "
+                   "Rasio ROP norm di bawah 1 berarti efisiensi relatif menurun; "
+                   "periksa juga stabilitas WOB/RPM sebelum menafsirkan.")
+        call_wide(st.line_chart, indicators, x="Baris",
+                  y=["Rasio_ROP_norm", "Rasio_Torque_per_WOB"], height=230)
     if st.checkbox("Siapkan ekspor indikator telemetri (analisis seluruh sampel)",
                    key="phase1_export_indicator_enabled", value=False):
         all_indicators = cached_formation_indicators(simulation_data)
