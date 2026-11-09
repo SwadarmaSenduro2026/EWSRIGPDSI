@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
 
 # ==========================================================
 # EWS PEMBORAN - PROTOTIPE SIMULASI
@@ -2128,6 +2127,64 @@ def render_ap_png(cache_key, theme, show_raw, nominal, x_label, _hist):
 
 
 # ==========================================================
+# CACHE GAMBAR FUZZY-PID PER-SESSION
+# Jangan menghancurkan elemen grafik pada setiap full rerun.
+# Pembaruan data di kartu/alarms tetap mengikuti timer utama; hanya PNG
+# Matplotlib yang dibuat ulang lebih jarang untuk mengurangi kedipan.
+# ==========================================================
+AP_CHART_UPDATE_SECONDS = 6.0
+
+
+def get_stable_ap_chart(ap_view, params, theme, show_raw):
+    """Simpan gambar terakhir pada session_state supaya chart tidak hilang saat refresh.
+
+    Cache tidak mengubah snapshot model maupun fungsi pengendali. Setiap sesi
+    menyimpan SATU bytes PNG terakhir saja; jika playback di-reset / controller
+    restart / opsi raw diubah, gambar langsung dibuat ulang.
+    """
+    hist = ap_view["hist"]
+    nominal = {
+        "ROP": float(params["ap_rop_target"]),
+        "WOB": float(params["ap_wob_sp"]),
+        "RPM": float(params["ap_rpm_sp"]),
+        "Torque": float(ap_view["nom"]["Torque"]),
+        "StandpipePressure": float(ap_view["nom"]["StandpipePressure"]),
+    }
+    depth_arr = np.asarray(hist["depth"], dtype=float)
+    x_label = "Kedalaman TMD (m)" if np.all(np.isfinite(depth_arr)) else "Waktu"
+    current_index = int(hist["idx"][-1])
+    run_id = int(ap_view["uid"])
+    identity = (run_id, theme, bool(show_raw), x_label, tuple(sorted(nominal.items())))
+    previous = st.session_state.get("_ap_chart_last")
+    now = time.monotonic()
+    redraw = (
+        not isinstance(previous, dict)
+        or previous.get("identity") != identity
+        or current_index < previous.get("index", -1)
+        or (current_index != previous.get("index")
+            and now - previous.get("rendered_at", 0.0) >= AP_CHART_UPDATE_SECONDS)
+    )
+    if redraw:
+        cache_key = (run_id, len(hist["t"]), current_index, bool(show_raw), x_label)
+        try:
+            png = render_ap_png(cache_key, theme, bool(show_raw), nominal, x_label, hist)
+        except (RuntimeError, ValueError, OSError, TypeError) as exc:
+            # Jangan menjatuhkan seluruh dashboard akibat satu frame gagal.
+            # Bila ada frame lama milik controller sama, pertahankan sementara.
+            if not isinstance(previous, dict) or previous.get("identity") != identity:
+                raise
+            return previous["png"], previous["index"], True
+        st.session_state["_ap_chart_last"] = {
+            "identity": identity,
+            "index": current_index,
+            "rendered_at": now,
+            "png": png,
+        }
+        previous = st.session_state["_ap_chart_last"]
+    return previous["png"], previous["index"], False
+
+
+# ==========================================================
 # KOMPONEN KABIN DRILLER (SVG/HTML murni, ringan dan ikut tema)
 # ==========================================================
 def _arc(cx, cy, r, f0, f1):
@@ -2399,11 +2456,12 @@ if ap_data is None and view == "Persiapan Simulasi":
 if field_data is None:
     st.warning("Dataset lapangan tidak tersedia atau rusak: " + str(load_error_3))
 
-# Refresh otomatis. Interval menyesuaikan lama proses agar putaran tidak saling menumpuk
-# (penyebab elemen hilang-muncul di versi sebelumnya).
-last_run = float(st.session_state.get("_run_secs", 0.3))
-refresh_ms = 1000 if last_run < 0.6 else 2000 if last_run < 1.3 else 3000
-st_autorefresh(interval=refresh_ms, key="ews_refresh")
+# Refresh seluruh dashboard menggunakan timer fragment bawaan Streamlit.
+# Registrasinya dilakukan SETELAH seluruh tampilan selesai dirender (lihat akhir file),
+# agar tidak bergantung pada komponen iframe streamlit-autorefresh.
+# Halaman pengaturan tetap bebas dari refresh paksa ketika admin mengedit parameter.
+LIVE_REFRESH_VIEWS = {"Kabin Driller", "Dasbor EWS", "Dasbor Fuzzy-PID", "Skenario Formasi", "Hasil Penelitian"}
+LIVE_REFRESH_INTERVAL = 2.0 if view == "Dasbor Fuzzy-PID" else 1.0
 
 # Ambil nilai parameter bersama terbaru.
 with shared["lock"]:
@@ -2718,7 +2776,11 @@ messages = {
 # ---------------------------- STATUS ----------------------------
 with sec_status:
     if not (is_setup or is_results or is_settings):
-        st.caption(f"Pemutaran sampel {index + 1}/{n} · {scenario} · Profil formasi: {params['formation_profile']}")
+        playback_label = "▶ BERJALAN" if not snap["paused"] else "⏸ DIJEDA"
+        st.caption(
+            f"{playback_label} · Sampel {index + 1}/{n} · {scenario} · "
+            f"Profil formasi: {params['formation_profile']}"
+        )
     if snap["stale"]:
         panel_class = "lverr"
         panel_label = "DATA TERLAMBAT"
@@ -3184,20 +3246,11 @@ if is_fuzzy:
             '<div class="section-title" style="font-size: 16px; color: var(--accent);">Dasbor Khusus: Analisis Auto Pilot Fuzzy-PID</div>',
             unsafe_allow_html=True,
         )
-        slot_mode = st.empty()
-        slot_cards = st.empty()
-        slot_brake = st.empty()
-        slot_check = st.empty()
-        slot_chart = st.empty()
-        slot_caption = st.empty()
-        slot_kpi = st.empty()
-        slot_gain = st.empty()
-
-        show_raw = slot_check.checkbox(
-            "Tampilkan data mentah rig (garis samar)", value=True, key="ap_show_raw"
-        )
+        # Render berurutan, bukan menyiapkan banyak st.empty() di awal.
+        # Placeholder yang dibuat lalu kosong pada rerun dapat membuat grafik
+        # Matplotlib terlihat hilang sesaat ketika refresh berlangsung.
         if ap_on:
-            slot_mode.markdown(
+            st.markdown(
                 notice(
                     "Mode auto pilot <b>AKTIF</b>. Data rig diakuisisi dan diproses pengendali "
                     "Fuzzy-PID; hasil yang telah dihaluskan tampil pada grafik di bawah."
@@ -3205,11 +3258,11 @@ if is_fuzzy:
                 unsafe_allow_html=True,
             )
         else:
-            slot_mode.markdown(
+            st.markdown(
                 notice(
                     "Mode auto pilot <b>nonaktif</b>. "
                     + ("Menampilkan hasil terakhir. " if ap_view else "")
-                    + "Admin dapat mengaktifkannya melalui sidebar."
+                    + "Admin dapat mengaktifkannya melalui Persiapan Simulasi."
                 ),
                 unsafe_allow_html=True,
             )
@@ -3239,7 +3292,7 @@ if is_fuzzy:
                 ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
                              "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
             ]
-            slot_cards.markdown(
+            st.markdown(
                 _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
                 unsafe_allow_html=True,
             )
@@ -3254,8 +3307,10 @@ if is_fuzzy:
                 unsafe_allow_html=True,
             )
 
+            # Posisi pemberitahuan pengereman tetap agar grafik tidak berpindah.
+            brake_slot = st.empty()
             if brake >= 0.10:
-                slot_brake.markdown(
+                brake_slot.markdown(
                     notice(
                         f"<b>Pengereman putaran aktif ({brake * 100:.0f}%).</b> Torsi "
                         f"{ap_view['rise_t']:+.0f}% dan standpipe pressure {ap_view['rise_p']:+.0f}% "
@@ -3266,26 +3321,24 @@ if is_fuzzy:
                 )
 
             # 3. GRAFIK DUAL-PLOT (CO-SIMULATION)
-            nominal = {
-                "ROP": float(params["ap_rop_target"]),
-                "WOB": float(params["ap_wob_sp"]),
-                "RPM": float(params["ap_rpm_sp"]),
-                "Torque": float(ap_view["nom"]["Torque"]),
-                "StandpipePressure": float(ap_view["nom"]["StandpipePressure"]),
-            }
-            depth_arr = series("depth")
-            ap_x_label = "Kedalaman TMD (m)" if np.all(np.isfinite(depth_arr)) else "Waktu"
-            ap_key = (
-                int(ap_view["uid"]), len(hist["t"]), int(hist["idx"][-1]),
-                bool(show_raw), ap_x_label,
+            # Checkbox tetap sebelum chart. Tidak lagi berada dalam slot awal.
+            show_raw = st.checkbox(
+                "Tampilkan data mentah rig (garis samar)", value=True, key="ap_show_raw"
             )
-            png = render_ap_png(ap_key, THEME_NAME, bool(show_raw), nominal, ap_x_label, hist)
-            show_image(slot_chart, png)
-
-            slot_caption.caption(
+            chart_png, plotted_index, chart_fallback = get_stable_ap_chart(
+                ap_view, params, THEME_NAME, bool(show_raw)
+            )
+            # Image langsung pada posisi tetap (bukan st.empty yang dihapus tiap rerun).
+            show_image(st, chart_png)
+            if chart_fallback:
+                st.warning("Grafik memakai frame terakhir karena pembaruan gambar gagal. "
+                           "Periksa Cloud logs bila berulang.")
+            st.caption(
                 "100% adalah nilai acuan: setpoint auto pilot untuk WOB, RPM, dan ROP, serta "
                 "baseline awal untuk torsi dan standpipe pressure. Area merah menandai saat "
-                "pengereman putaran aktif."
+                "pengereman putaran aktif. "
+                f"Grafik sampai sampel ke-{plotted_index + 1}; gambar diperbarui paling cepat "
+                f"setiap {AP_CHART_UPDATE_SECONDS:g} detik, kartu kontrol tetap live."
             )
 
             # 4. TABEL KPI PERFORMA
@@ -3312,7 +3365,7 @@ if is_fuzzy:
                  "Data mentah": "-",
                  "Auto pilot": f"{int(np.sum(series('brake') > 0.10))}"},
             ]
-            slot_kpi.markdown(
+            st.markdown(
                 '<div class="section-title">Ringkasan Kinerja Auto Pilot (Mitigasi NPT)</div>'
                 + html_table(kpi_rows, ["Indikator", "Data mentah", "Auto pilot"])
                 + _h(f'<div class="view-note">Dihitung dari {len(hist["t"])} sampel yang telah diproses sejak '
@@ -3330,7 +3383,7 @@ if is_fuzzy:
                 }
                 for name in AP_CHANNEL_LIST
             ]
-            slot_gain.markdown(
+            st.markdown(
                 '<div class="section-title">Logika Fuzzy: Nilai Tuning Kp, Ki, Kd Saat Ini</div>'
                 + html_table(gain_rows, ["Kanal", "Kp", "Ki", "Kd"])
                 + '<div class="view-note">Gain dasar tiap kanal terus disesuaikan oleh logika fuzzy '
@@ -3450,5 +3503,24 @@ with sec_players:
     if snap["ack"] and snap["ack_fresh"]:
         components.html(ack_stop_html(snap["ack"]), height=0)
 
-# catat lama proses untuk mengatur interval refresh berikutnya
-st.session_state["_run_secs"] = 0.5 * last_run + 0.5 * (time.time() - RUN_START)
+# Catat waktu proses untuk diagnostik; tidak lagi menentukan timer dari iframe.
+st.session_state["_run_secs"] = time.time() - RUN_START
+
+# PENTING: selama Fase 1, mesin playback maju pada setiap process_simulation().
+# st.fragment(run_every=...) memberi heartbeat yang meminta full-app rerun,
+# sehingga seluruh panel/status/gauge memperoleh snapshot baru tanpa pindah menu.
+# Fragment dipasang di akhir script, setelah elemen dashboard selesai dirender.
+if view in LIVE_REFRESH_VIEWS:
+    # Pada initial/full run: heartbeat tidak memicu rerun seketika.
+    st.session_state["_live_refresh_full_run_at"] = time.monotonic()
+
+    @st.fragment(run_every=LIVE_REFRESH_INTERVAL)
+    def _live_dashboard_heartbeat():
+        # Caption kecil ini juga memastikan fragment mempunyai elemen render.
+        st.caption(f"↻ Penyegaran tampilan otomatis (~{LIVE_REFRESH_INTERVAL:g} dtk) · "
+                   "data playback, bukan sensor rig langsung")
+        elapsed = time.monotonic() - st.session_state.get("_live_refresh_full_run_at", time.monotonic())
+        if elapsed >= LIVE_REFRESH_INTERVAL * 0.8:
+            st.rerun()  # full rerun memperbarui semua panel, termasuk alarm/ACK
+
+    _live_dashboard_heartbeat()
