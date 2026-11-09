@@ -170,8 +170,27 @@ SCENARIO_PRESETS = {
 }
 DEFAULT_SCENARIO = SCENARIOS[3]
 
+# Fase 1: profil formasi hipotetis untuk menyiapkan eksperimen riset.
+# Ini BUKAN label litologi, UCS, atau hasil interpretasi geologi NEAC-001.
+FORMATION_PROFILES = [
+    "Lunak → Sedang → Keras (ilustrasi)",
+    "Keras → Sedang → Lunak (ilustrasi)",
+    "Berlapis L-S-K-S-L (ilustrasi)",
+    "Telemetri saja (tanpa label batuan)",
+]
+FORMATION_TIER = {
+    "LUNAK": {"drillability": 1.00, "description": "Resistansi relatif rendah (skenario)"},
+    "SEDANG": {"drillability": 0.70, "description": "Resistansi relatif menengah (skenario)"},
+    "KERAS": {"drillability": 0.45, "description": "Resistansi relatif tinggi (skenario)"},
+}
+APP_VIEWS = [
+    "Persiapan Simulasi", "Kabin Driller", "Dasbor EWS",
+    "Dasbor Fuzzy-PID", "Skenario Formasi", "Hasil Penelitian", "Pengaturan Sistem",
+]
+
 DEFAULT_PARAMS = {
     "scenario": DEFAULT_SCENARIO,
+    "formation_profile": FORMATION_PROFILES[0],
     "interval": 1,
     "batch_size": 1,
     "auto": True,
@@ -204,6 +223,7 @@ DEFAULT_PARAMS = {
 
 PARAM_LABELS = {
     "scenario": "Skenario",
+    "formation_profile": "Profil formasi ilustratif",
     "interval": "Interval pembaruan (detik)",
     "batch_size": "Baris per pembaruan",
     "auto": "Simulasi otomatis",
@@ -268,7 +288,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v7-stabilized-neac001"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v8-phase1-hmi-formation"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -1591,6 +1611,120 @@ def process_simulation(data, ap_data=None, field_data=None):
     return source, snapshot
 
 
+
+# ==========================================================
+# SKENARIO FORMASI FASE 1 (ANALISIS OBSERVASIONAL SAJA)
+# Tidak tersambung ke generator setpoint / plant / Fuzzy-PID.
+# ==========================================================
+def formation_zone(profile, index, length):
+    """Label hipotetis berdasarkan posisi indeks; bukan observasi geologi."""
+    if profile == FORMATION_PROFILES[3] or length <= 0:
+        return None
+    position = min(max(int(index), 0), length - 1) / max(length, 1)
+    if profile == FORMATION_PROFILES[0]:
+        names = ("LUNAK", "SEDANG", "KERAS")
+    elif profile == FORMATION_PROFILES[1]:
+        names = ("KERAS", "SEDANG", "LUNAK")
+    else:
+        names = ("LUNAK", "SEDANG", "KERAS", "SEDANG", "LUNAK")
+    return names[min(int(position * len(names)), len(names) - 1)]
+
+
+def formation_schedule(source, profile):
+    """Tabel profil zona buatan untuk pengujian antarmuka; sumber data tidak diubah."""
+    n = len(source)
+    if n == 0 or profile == FORMATION_PROFILES[3]:
+        return pd.DataFrame(columns=["Baris", "Depth_m", "Zona_skenario", "Drillability_relatif"])
+    labels = [formation_zone(profile, i, n) for i in range(n)]
+    depth = source["Depth_m"].to_numpy() if "Depth_m" in source else np.full(n, np.nan)
+    return pd.DataFrame({
+        "Baris": np.arange(1, n + 1),
+        "Depth_m": depth,
+        "Zona_skenario": labels,
+        "Drillability_relatif": [FORMATION_TIER[name]["drillability"] for name in labels],
+    })
+
+
+def formation_evidence(source, index, lookback=12):
+    """Bandingkan dua jendela telemetri, tanpa mengklaim litologi.
+
+    ROP dinormalisasi terhadap perubahan WOB dan RPM sebagai indikator
+    eksploratif. Torsi/WOB dan tren RPM dilaporkan terpisah; thresholdnya
+    hanya untuk demonstrasi dan tidak digunakan mengatur setpoint.
+    """
+    size = max(int(lookback), 5)
+    if index + 1 < 2 * size:
+        return {"status": "DATA BELUM CUKUP", "reason": f"Memerlukan sedikitnya {2*size} baris.",
+                "eff_ratio": None, "torque_ratio": None, "rpm_ratio": None, "wob_ratio": None}
+    subset = source.iloc[max(0, index + 1 - 2 * size):index + 1].copy()
+    cols = ["ROP", "WOB", "RPM", "Torque"]
+    for key in cols:
+        subset[key] = pd.to_numeric(subset[key], errors="coerce")
+    if (not np.isfinite(subset[cols].to_numpy(dtype=float)).all()
+            or (subset["ROP"] <= 0).any()
+            or (subset["WOB"] <= 0).any()
+            or (subset["RPM"] <= 0).any()
+            or (subset["Torque"] < 0).any()):
+        return {"status": "DATA TIDAK VALID", "reason": "Ada nilai nol, kosong atau nonfisik pada jendela uji.",
+                "eff_ratio": None, "torque_ratio": None, "rpm_ratio": None, "wob_ratio": None}
+
+    # Metrik komposit tak berdimensi (penelitian awal), bukan UCS atau MSE.
+    subset["proxy_eff"] = (subset["ROP"] / (subset["WOB"] ** 0.6 * subset["RPM"] ** 0.5))
+    subset["proxy_torque"] = subset["Torque"] / subset["WOB"]
+    first, last = subset.iloc[:size], subset.iloc[size:]
+    def ratio(key):
+        left = float(first[key].median())
+        right = float(last[key].median())
+        return right / left if left > 1e-8 else None
+    eff = ratio("proxy_eff")
+    tor = ratio("proxy_torque")
+    rpm = ratio("RPM")
+    wob = ratio("WOB")
+    if None in (eff, tor, rpm, wob):
+        return {"status": "TIDAK DAPAT DITENTUKAN", "reason": "Baseline pembanding mendekati nol.",
+                "eff_ratio": eff, "torque_ratio": tor, "rpm_ratio": rpm, "wob_ratio": wob}
+
+    stable_settings = abs(rpm - 1) <= 0.12 and abs(wob - 1) <= 0.15
+    # Resistansi hanya diindikasikan bila ROP ternormalisasi berubah;
+    # kenaikan RPM/Torque sendiri tidak cukup menyimpulkan kerasnya batuan.
+    if eff <= 0.82 and stable_settings:
+        label = "INDIKASI RESISTANSI MENINGKAT"
+        reason = "Efisiensi penetrasi relatif turun dengan RPM dan WOB cukup stabil."
+    elif eff >= 1.22 and stable_settings:
+        label = "INDIKASI RESISTANSI MENURUN"
+        reason = "Efisiensi penetrasi relatif naik dengan RPM dan WOB cukup stabil."
+    elif not stable_settings:
+        label = "KONDISI OPERASI BERUBAH"
+        reason = "RPM atau WOB berubah signifikan; indikasi batuan tidak dapat dipisahkan dari perubahan operasi."
+    else:
+        label = "TIDAK ADA PERUBAHAN JELAS"
+        reason = "Jendela terbaru tidak memperlihatkan perubahan efisiensi relatif yang cukup besar."
+    if tor >= 1.15:
+        reason += " Torsi/WOB juga meningkat; cek kemungkinan gesekan, bit wear, atau stick-slip."
+    if rpm >= 1.12:
+        reason += " RPM naik, sehingga kenaikan torsi saja bukan bukti batuan mengeras."
+    return {"status": label, "reason": reason, "eff_ratio": eff,
+            "torque_ratio": tor, "rpm_ratio": rpm, "wob_ratio": wob}
+
+
+def formation_indicator_frame(source, index, lookback=12):
+    """Pindai indikasi telemetri untuk ekspor riset (bukan classifier litologi)."""
+    end = max(0, min(int(index) + 1, len(source)))
+    rows = []
+    for i in range(end):
+        signal = formation_evidence(source, i, lookback=lookback)
+        rows.append({"Baris": i + 1, "Indikasi": signal["status"],
+                     "Rasio_ROP_norm": signal["eff_ratio"],
+                     "Rasio_Torque_per_WOB": signal["torque_ratio"],
+                     "Rasio_RPM": signal["rpm_ratio"], "Rasio_WOB": signal["wob_ratio"]})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def cached_formation_indicators(source, lookback=12):
+    """Hitung sekali untuk seluruh dataset; UI hanya memotong indeks playback."""
+    return formation_indicator_frame(source, len(source) - 1, lookback=lookback)
+
 # ==========================================================
 # CALLBACK WIDGET (dipanggil saat pengguna mengubah sesuatu)
 # ==========================================================
@@ -2184,11 +2318,28 @@ with st.sidebar:
         st.session_state.pop("role", None)
         st.rerun()
 
+    st.divider()
+    view = st.radio(
+        "Navigasi Penelitian", APP_VIEWS, key="view_mode",
+        help="Mulai dari Persiapan Simulasi, lalu monitoring dan evaluasi."
+    )
+    st.divider()
+    st.caption("KENDALI PLAYBACK · berlaku untuk semua perangkat")
+    with shared["lock"]:
+        playback_active = bool(shared["params"]["auto"])
+    call_wide(st.button, "⏸ Jeda" if playback_active else "▶ Jalankan",
+              key="phase1_play", disabled=not is_admin, on_click=toggle_play)
+    call_wide(st.button, "↺ Reset playback & alarm", key="phase1_reset",
+              disabled=not is_admin, on_click=reset_simulation)
+    st.caption("Konfigurasi eksperimen ada di Persiapan Simulasi; ambang alarm di Pengaturan Sistem.")
+    with st.expander("Suara dan getar perangkat ini"):
+        components.html(controller_html(PAL), height=100)
+
 st.markdown(_h(f"""
 <div class="ews-header">
   <div>
-    <div class="ews-title">EWS Telemetry Monitoring</div>
-    <div class="ews-sub">Early Warning System - Drilling Operations</div>
+    <div class="ews-title">PDSI | Adaptive Drilling Research</div>
+    <div class="ews-sub">Co-Simulation HMI · EWS · Fuzzy-PID | Fase 1</div>
   </div>
   <div>
     <span class="tag sim">Simulasi / playback</span>
@@ -2238,11 +2389,12 @@ if data is None and ap_data is None and field_data is None:
 
 if data is None:
     data = ap_data if ap_data is not None else field_data
-    st.warning(
-        "Dataset sintetis tidak tersedia atau tidak valid. Mode sintetis akan memakai "
-        "sumber data cadangan; hasilnya bukan dataset sintetis asli."
-    )
-if ap_data is None:
+    if view == "Persiapan Simulasi":
+        st.warning(
+            "Dataset sintetis tidak tersedia atau tidak valid. Mode sintetis memakai "
+            "sumber data cadangan; hasilnya bukan dataset sintetis asli."
+        )
+if ap_data is None and view == "Persiapan Simulasi":
     st.caption("Dataset auto pilot opsional tidak tersedia; jika dipilih, digunakan sumber data cadangan.")
 if field_data is None:
     st.warning("Dataset lapangan tidak tersedia atau rusak: " + str(load_error_3))
@@ -2261,6 +2413,7 @@ with shared["lock"]:
 
 # Samakan nilai widget dengan nilai bersama SEBELUM widget dibuat.
 st.session_state["w_scenario"] = current["scenario"]
+st.session_state["w_formation_profile"] = current["formation_profile"]
 st.session_state["w_interval"] = current["interval"]
 st.session_state["w_batch_size"] = current["batch_size"]
 st.session_state["w_auto"] = current["auto"]
@@ -2298,17 +2451,14 @@ def inline_warning(condition, text):
         slot.error(text)
 
 
-# ---------------------------- SIDEBAR ----------------------------
-with st.sidebar:
-    st.markdown('<div class="side-title">Kontrol simulasi</div>', unsafe_allow_html=True)
-    if is_admin:
-        st.caption("Perubahan di sini berlaku untuk semua device.")
-    else:
-        st.markdown(
-            notice("Pengaturan terkunci. Hanya admin yang dapat mengubahnya."),
-            unsafe_allow_html=True,
-        )
-
+# ---------------------------- HALAMAN SETUP / PENGATURAN ----------------------------
+# Widget konfigurasi hanya dibuat pada halaman terkait. Nilai dibaca dari
+# shared cache_resource sebelum widget dibuat sehingga pindah halaman aman.
+if view == "Persiapan Simulasi":
+    st.subheader("01 · Persiapan eksperimen")
+    st.info("Urutan: pilih data → tentukan profil uji → pilih mode Fuzzy-PID → jalankan playback. Profil batuan fase ini hanya label ilustratif; tidak mengubah data atau setpoint.")
+    if not is_admin:
+        st.caption("Akses viewer: pengaturan dapat dilihat tetapi tidak dapat diubah.")
     st.selectbox(
         "Skenario", SCENARIOS, key="w_scenario", disabled=locked,
         on_change=update_param, args=("scenario", "w_scenario"),
@@ -2343,12 +2493,13 @@ with st.sidebar:
         on_change=update_param, args=("loop_data", "w_loop_data"),
     )
 
-    st.markdown(
-        '<div class="side-title" style="margin-top:14px">Suara dan getar (perangkat ini)</div>',
-        unsafe_allow_html=True,
-    )
-    components.html(controller_html(PAL), height=100)
 
+    st.selectbox(
+        "Profil batuan hipotetis (untuk label eksperimen)", FORMATION_PROFILES,
+        key="w_formation_profile", disabled=locked,
+        on_change=update_param, args=("formation_profile", "w_formation_profile"),
+    )
+    st.caption("Drillability relatif: lunak 1,00 · sedang 0,70 · keras 0,45. Angka ini adalah koefisien ilustrasi, bukan UCS atau data litologi NEAC-001.")
     with st.expander("Pengaturan auto pilot (Fuzzy-PID)"):
         st.caption(
             "Setpoint yang dipertahankan pengendali. Pengereman putaran aktif saat "
@@ -2385,6 +2536,16 @@ with st.sidebar:
             "Kenaikan sedang harus lebih kecil dari kenaikan tinggi",
         )
 
+
+    st.divider()
+    call_wide(st.button, "Terapkan preset ambang dataset", disabled=locked,
+              on_click=apply_scenario_preset, key="phase1_preset")
+    call_wide(st.button, "Lompat ke baris terakhir", disabled=locked,
+              on_click=jump_to_last, key="phase1_jump")
+
+if view == "Pengaturan Sistem":
+    st.subheader("07 · Pengaturan EWS dan diagnostik")
+    st.caption("Hanya admin yang dapat mengubah parameter. Semua perubahan berlaku pada sesi server yang sama.")
     with st.expander("Ambang alarm (demonstrasi)"):
         for parameter in PARAMETERS:
             st.markdown(f"**{DISPLAY_NAME.get(parameter, parameter)}** ({UNITS[parameter]})")
@@ -2489,34 +2650,26 @@ with st.sidebar:
             disabled=locked or not wa_ready, on_click=send_wa_test,
         )
 
-    call_wide(
-        st.button, "Terapkan preset ambang skenario ini",
-        disabled=locked, on_click=apply_scenario_preset, key="btn_preset",
-    )
-    call_wide(
-        st.button, "Kembalikan semua parameter ke default",
-        disabled=locked, on_click=reset_params_to_default, key="btn_default",
-    )
+    call_wide(st.button, "Terapkan preset skenario ini", disabled=locked,
+              on_click=apply_scenario_preset, key="phase1_preset_settings")
+    call_wide(st.button, "Kembalikan seluruh parameter ke default", disabled=locked,
+              on_click=reset_params_to_default, key="phase1_default")
     st.caption(
         "Terakhir diubah: "
         + (f"{updated_at.strftime('%d-%m-%Y %H:%M:%S')} WIB oleh {updated_by}" if updated_at else "-")
     )
 
-    st.divider()
-
-    call_wide(st.button, "Reset simulasi", disabled=locked, on_click=reset_simulation, key="btn_reset")
-    call_wide(st.button, "Lompat ke data terakhir", disabled=locked, on_click=jump_to_last, key="btn_jump")
 
 # ---------------------------- KERANGKA HALAMAN ----------------------------
 # Semua bagian dibuat SELALU dengan urutan tetap. Isinya boleh berubah tiap detik,
 # tetapi jumlah elemen tingkat atas tidak, sehingga grafik dan tabel tidak dibuat ulang.
-view = st.radio(
-    "Tampilan", ["Kabin Driller", "Dasbor EWS", "Dasbor Fuzzy-PID"], horizontal=True,
-    key="view_mode", label_visibility="collapsed",
-)
 is_cabin = view == "Kabin Driller"
 is_ews = view == "Dasbor EWS"
 is_fuzzy = view == "Dasbor Fuzzy-PID"
+is_setup = view == "Persiapan Simulasi"
+is_formation = view == "Skenario Formasi"
+is_results = view == "Hasil Penelitian"
+is_settings = view == "Pengaturan Sistem"
 
 sec_status = st.container()
 sec_ack = st.container()
@@ -2564,6 +2717,8 @@ messages = {
 
 # ---------------------------- STATUS ----------------------------
 with sec_status:
+    if not (is_setup or is_results or is_settings):
+        st.caption(f"Pemutaran sampel {index + 1}/{n} · {scenario} · Profil formasi: {params['formation_profile']}")
     if snap["stale"]:
         panel_class = "lverr"
         panel_label = "DATA TERLAMBAT"
@@ -2580,7 +2735,8 @@ with sec_status:
     sample_time = latest["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
     depth_text = f"<span>Kedalaman: {_num(latest.get('Depth_m'), 2)} m</span>" if has_depth else ""
     progress_pct = (index + 1) / n * 100
-    st.markdown(_h(f"""
+    if not (is_setup or is_results or is_settings):
+        st.markdown(_h(f"""
     <div class="status-panel {panel_class}">
       <div class="status-kicker">Status EWS simulasi</div>
       <div class="status-title">{panel_label}</div>
@@ -2625,7 +2781,7 @@ with sec_alerts:
     slot_sensor = st.empty()
     slot_paused = st.empty()
     slot_missing = st.empty()
-    if scenario == SCENARIOS[3] and field_data is not None:
+    if (is_ews or is_settings) and scenario == SCENARIOS[3] and field_data is not None:
         d_first = _num(simulation_data["Depth_m"].iloc[0], 1)
         d_last = _num(simulation_data["Depth_m"].iloc[-1], 1)
         slot_field.markdown(
@@ -2651,11 +2807,93 @@ with sec_alerts:
             notice("Simulasi sedang dijeda. Data tidak diperbarui."),
             unsafe_allow_html=True,
         )
-    if scenario == SCENARIOS[2] and ap_data is None:
+    if (is_setup or is_settings) and scenario == SCENARIOS[2] and ap_data is None:
         slot_missing.markdown(
             notice(f"File <b>{AUTOPILOT_FILE}</b> tidak ditemukan di repo; dashboard memakai dataset lama.", "err"),
             unsafe_allow_html=True,
         )
+
+# ---------------------------- RINGKASAN FORMASI ----------------------------
+formation_now = formation_zone(params["formation_profile"], index, n)
+formation_signal = formation_evidence(simulation_data, index)
+if is_setup:
+    st.markdown("### Status kesiapan eksperimen")
+    a,b,c = st.columns(3)
+    a.metric("Sumber data", f"{n} sampel")
+    b.metric("Playback", "RUNNING" if params["auto"] else "PAUSED")
+    c.metric("Pengendali", "Fuzzy-PID ON" if ap_on else "Fuzzy-PID OFF")
+    st.caption("Setelah memeriksa konfigurasi, pilih Kabin Driller untuk monitoring atau Skenario Formasi untuk mengevaluasi indikasi telemetri.")
+    st.info("Model Bingham, identifikasi litologi terverifikasi, dan perubahan setpoint WOB berbasis zona batuan belum diaktifkan pada Fase 1.")
+
+if is_cabin or is_ews or is_fuzzy:
+    st.markdown("### Ringkasan penelitian formasi")
+    a,b = st.columns(2)
+    a.metric("Profil hipotetis", formation_now or "Tanpa label")
+    b.metric("Indikator telemetri", formation_signal["status"])
+    st.caption("Label profil adalah konstruksi eksperimen, bukan hasil sensor. Indikator telemetri berbasis perubahan ROP ternormalisasi, WOB, RPM, dan torsi; belum tervalidasi sebagai jenis batuan.")
+
+if is_formation:
+    st.subheader("05 · Skenario formasi lunak–sedang–keras")
+    st.warning("LABEL SKENARIO ≠ LITOLOGI NYATA. Zona dibuat menurut persentase indeks playback, bukan hasil logging/UCS. Skenario ini hanya memengaruhi label HMI dan unduhan CSV; tidak memodifikasi dataset, alarm, atau pengendali Fuzzy-PID.")
+    a,b,c = st.columns(3)
+    a.metric("Zona ilustratif saat ini", formation_now or "Tidak dipilih")
+    b.metric("Indikasi telemetry", formation_signal["status"])
+    c.metric("Sampel", f"{index+1}/{n}")
+    st.markdown("**Dua pendekatan yang dibedakan**")
+    st.write("(1) Profil simulasi: lunak → sedang → keras sebagai *ground truth buatan* untuk percobaan berikutnya. (2) Bukti telemetri: perubahan efisiensi ROP relatif dengan memeriksa stabilitas WOB/RPM dan torsi per WOB.")
+    st.caption(formation_signal["reason"])
+    metr = st.columns(4)
+    for target, label, k in zip(metr, ["ROP norm", "Torque/WOB", "RPM", "WOB"],
+                                ["eff_ratio", "torque_ratio", "rpm_ratio", "wob_ratio"]):
+        value = formation_signal[k]
+        target.metric(label, f"{value:.2f} ×" if value is not None else "–")
+    st.markdown("**Cara membaca sinyal**: RPM dan torsi naik bersamaan bukan bukti batuan mengeras. Perubahan RPM/WOB dapat menjelaskan kenaikan torsi. Indikasi resistansi lebih kuat bila ROP ternormalisasi turun saat WOB/RPM relatif stabil; tetap perlu validasi litologi dan kondisi bit/hidraulika.")
+    schedule = formation_schedule(simulation_data, params["formation_profile"])
+    if not schedule.empty:
+        segments = schedule.loc[schedule["Zona_skenario"].ne(schedule["Zona_skenario"].shift()),
+                                ["Baris", "Depth_m", "Zona_skenario", "Drillability_relatif"]]
+        st.markdown("**Transisi zona skenario**")
+        call_wide(st.dataframe, segments.reset_index(drop=True), hide_index=True)
+        st.download_button("Unduh skenario hipotetis CSV", schedule.to_csv(index=False).encode("utf-8-sig"),
+                           "profil_formasi_hipotetis.csv", "text/csv", key="formation_schedule_download")
+    st.markdown("**Cuplikan telemetri asli (grafik per parameter)**")
+    chart = simulation_data.iloc[max(0,index-119):index+1][["ROP", "WOB", "RPM", "Torque"]]
+    cells = st.columns(2)
+    for pos, (column, unit) in enumerate((("ROP", "m/h"), ("WOB", "kN"),
+                                         ("RPM", "rpm"), ("Torque", "kN.m"))):
+        cells[pos % 2].caption(f"{column} ({unit})")
+        call_wide(cells[pos % 2].line_chart, chart[[column]])
+    st.caption("Setiap grafik memiliki skala sendiri. Interpretasi formasi harus didukung data litologi/UCS dan evaluasi parameter operasi.")
+    if st.checkbox("Siapkan ekspor indikator telemetri (analisis seluruh sampel)",
+                   key="phase1_export_indicator_enabled", value=False):
+        all_indicators = cached_formation_indicators(simulation_data)
+        frame = all_indicators.iloc[:index+1]
+        st.download_button("Unduh indikator telemetri CSV", frame.to_csv(index=False).encode("utf-8-sig"),
+                           "indikasi_formasi_telemetri.csv", "text/csv", key="formation_evidence_download")
+
+if is_results:
+    st.subheader("06 · Hasil penelitian sementara")
+    st.info("Hasil yang ditampilkan adalah evaluasi playback dan output model Fuzzy-PID sebelumnya, belum pembuktian peningkatan ROP lapangan atau mitigasi NPT.")
+    a,b,c = st.columns(3)
+    a.metric("Sampel ditinjau", f"{index+1}/{n}")
+    b.metric("Jumlah catatan EWS", str(len(events_list)))
+    c.metric("Status Fuzzy-PID", "ON" if ap_on else "OFF")
+    st.write("**Metadata eksperimen**")
+    st.json({"dataset": scenario, "samples_total": n, "samples_played": index+1,
+             "formation_profile": params["formation_profile"], "controller_mode": "Fuzzy-PID" if ap_on else "Baseline",
+             "disclaimer": "Label formasi hipotetis; tidak ada plant Bingham maupun adaptive formation setpoint pada fase ini"})
+    if ap_view and ap_view["hist"]["t"]:
+        hist = ap_view["hist"]
+        report = pd.DataFrame({k: v for k,v in hist.items() if k != "t"})
+        report.insert(0, "timestamp", [str(t) for t in hist["t"]])
+        st.markdown("**Histori keluaran model Fuzzy-PID**")
+        call_wide(st.dataframe, report.tail(20), hide_index=True)
+        st.download_button("Unduh hasil Fuzzy-PID CSV", report.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="hasil_fuzzy_pid_fase1.csv", mime="text/csv", key="results_fpid_download")
+    else:
+        st.caption("Aktifkan Fuzzy-PID dan jalankan playback untuk mengumpulkan hasil model.")
+    st.download_button("Unduh replay dataset CSV", visible.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="replay_data_neac001.csv", mime="text/csv", key="results_raw_download")
 
 # ==========================================================
 # TAMPILAN KABIN DRILLER
@@ -3144,28 +3382,29 @@ if is_fuzzy:
 # RIWAYAT, LOG AUDIT, CATATAN (kedua tampilan)
 # ==========================================================
 with sec_events:
-    st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
-    slot_event_table = st.empty()
-    slot_event_caption = st.empty()
-    slot_event_download = st.empty()
-    shown = 8 if is_cabin else 100
-    if events_list:
-        slot_event_table.markdown(
-            html_table(events_list[:shown], ["Waktu", "Level", "Parameter"], chip_column="Level"),
-            unsafe_allow_html=True,
-        )
-        slot_event_caption.caption(f"Menampilkan {min(len(events_list), shown)} dari {len(events_list)} catatan terbaru.")
-        slot_event_download.download_button(
-            "Unduh riwayat CSV",
-            pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
-            file_name="riwayat_ews.csv",
-            mime="text/csv",
-        )
-    else:
-        slot_event_table.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
+    if is_ews or is_cabin or is_results:
+        st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
+        slot_event_table = st.empty()
+        slot_event_caption = st.empty()
+        slot_event_download = st.empty()
+        shown = 8 if is_cabin else 100
+        if events_list:
+            slot_event_table.markdown(
+                html_table(events_list[:shown], ["Waktu", "Level", "Parameter"], chip_column="Level"),
+                unsafe_allow_html=True,
+            )
+            slot_event_caption.caption(f"Menampilkan {min(len(events_list), shown)} dari {len(events_list)} catatan terbaru.")
+            slot_event_download.download_button(
+                "Unduh riwayat CSV",
+                pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
+                file_name="riwayat_ews.csv",
+                mime="text/csv",
+            )
+        else:
+            slot_event_table.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
 
 with sec_audit:
-    if is_admin and not is_cabin:
+    if is_admin and (is_results or is_settings or is_ews):
         with st.expander("Log audit (khusus admin)"):
             slot_audit_table = st.empty()
             slot_audit_caption = st.empty()
