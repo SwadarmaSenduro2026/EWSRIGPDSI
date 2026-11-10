@@ -184,12 +184,16 @@ FORMATION_TIER = {
 }
 APP_VIEWS = [
     "Persiapan Simulasi", "Kabin Driller", "Dasbor EWS",
-    "Dasbor Fuzzy-PID", "Skenario Formasi", "Hasil Penelitian", "Pengaturan Sistem",
+    "Dasbor Fuzzy-PID", "Skenario Formasi", "Generator WOB Adaptif",
+    "Hasil Penelitian", "Pengaturan Sistem",
 ]
 
 DEFAULT_PARAMS = {
     "scenario": DEFAULT_SCENARIO,
     "formation_profile": FORMATION_PROFILES[0],
+    # Fase 2 - pengujian SHADOW: keluaran ini tidak mengendalikan Fuzzy-PID.
+    "shadow_wob_ceiling_kn": 30.0,
+    "shadow_ramp_pct": 2.0,
     "interval": 1,
     "batch_size": 1,
     "auto": True,
@@ -223,6 +227,8 @@ DEFAULT_PARAMS = {
 PARAM_LABELS = {
     "scenario": "Skenario",
     "formation_profile": "Profil formasi ilustratif",
+    "shadow_wob_ceiling_kn": "Batas atas WOB shadow (kN)",
+    "shadow_ramp_pct": "Maksimum perubahan WOB per sampel (%)",
     "interval": "Interval pembaruan (detik)",
     "batch_size": "Baris per pembaruan",
     "auto": "Simulasi otomatis",
@@ -1761,6 +1767,126 @@ def cached_formation_indicators(source, lookback=12):
     return formation_indicator_frame(source, len(source) - 1, lookback=lookback)
 
 # ==========================================================
+# FASE 2: ADAPTIVE WOB SETPOINT GENERATOR - SHADOW MODE
+# Tidak mengubah ap_step(), fpid_step(), model ROP, alarm, atau data sumber.
+# Ketiga zona hanya label hipotesis, bukan logging litologi / UCS.
+# ==========================================================
+
+SHADOW_ZONE_MULTIPLIER = {"LUNAK": 0.90, "SEDANG": 1.00, "KERAS": 1.10}
+
+
+def shadow_wob_step(base_wob, zone, signal, previous_wob, ceiling_kn=30.0,
+                    ramp_pct=2.0, ews_level=0, fault=False):
+    """Satu langkah rekomendasi WOB bayangan (tidak dikirim ke plant).
+
+    Guard konservatif berbasis indikator TELEMETRI bersifat demonstrasi saja.
+    Alarm EWS digunakan hanya untuk status langkah saat ini, bukan rekonstruksi
+    riwayat alarm, karena riwayat EWS bukan input fungsi grafik historis.
+    """
+    base = float(base_wob)
+    cap = float(ceiling_kn)
+    ramp = float(ramp_pct)
+    if not all(math.isfinite(x) for x in (base, cap, ramp)) or base <= 0 or cap <= 0 or ramp <= 0:
+        raise ValueError("Setpoint dasar dan batas shadow harus positif serta finite")
+    multiplier = SHADOW_ZONE_MULTIPLIER.get(zone, 1.0)
+    raw_candidate = max(0.0, min(base * multiplier, cap))
+    guarded = raw_candidate
+    notes = []
+    if zone is None:
+        notes.append("Tanpa label skenario: rekomendasi dimulai dari setpoint dasar")
+    status = str(signal.get("status", "DATA BELUM CUKUP"))
+    tor = signal.get("torque_ratio")
+    if status in ("DATA TIDAK VALID", "TIDAK DAPAT DITENTUKAN"):
+        guarded = min(guarded, base)
+        notes.append("Data tidak valid/tidak dapat ditentukan: tidak menaikkan WOB")
+    elif status == "KONDISI OPERASI BERUBAH":
+        guarded = min(guarded, base)
+        notes.append("WOB/RPM berubah: kenaikan ditahan sampai kondisi lebih jelas")
+    if tor is not None:
+        try:
+            tor_num = float(tor)
+            if math.isfinite(tor_num) and tor_num >= 1.15:
+                guarded = min(guarded, base)
+                notes.append("Rasio Torque/WOB meningkat: kenaikan dibatasi")
+        except (TypeError, ValueError):
+            pass
+    if bool(fault):
+        guarded = min(guarded, base * 0.90)
+        notes.append("Gangguan sensor/data: pratinjau dibatasi")
+    elif int(ews_level) >= 2:
+        guarded = min(guarded, base * 0.90)
+        notes.append("EWS MERAH/MAGENTA: pratinjau dibatasi")
+    elif int(ews_level) == 1:
+        guarded = min(guarded, base)
+        notes.append("EWS KUNING: pratinjau tidak boleh menaikkan WOB")
+    guarded = max(0.0, min(guarded, cap))
+    prev = base if previous_wob is None else float(previous_wob)
+    if not math.isfinite(prev):
+        prev = base
+    # Batas perubahan pada setiap sampel untuk mencegah lonjakan rekomendasi.
+    max_delta = max(0.01, base * ramp / 100.0)
+    proposed = max(prev - max_delta, min(prev + max_delta, guarded))
+    proposed = min(max(proposed, 0.0), cap)
+    return {
+        "zone": zone or "TANPA LABEL", "base": base,
+        "candidate": raw_candidate, "guarded": guarded,
+        "recommendation": proposed,
+        "status": status,
+        "reason": "; ".join(notes) if notes else "Zona skenario diperhitungkan; pembatas aktif: hanya batas atas dan ramp",
+    }
+
+
+def shadow_wob_history(source, params, upto_index, indicator_frame=None):
+    """Pratinjau historis tanpa EWS (EWS hanya dipakai untuk status terkini).
+
+    Hasil independen dari state playback/fuzzy-pid; data mentah tidak dimodifikasi.
+    """
+    end = max(0, min(int(upto_index) + 1, len(source)))
+    columns = ["Baris", "Depth_m", "Zona_skenario", "WOB_mentah_kN",
+               "WOB_dasar_kN", "WOB_kandidat_kN", "WOB_setelah_guard_kN",
+               "WOB_shadow_kN", "Indikasi_telemetri", "Alasan_guard"]
+    if end == 0:
+        return pd.DataFrame(columns=columns)
+    base = float(params["ap_wob_sp"])
+    if indicator_frame is None:
+        indicator_frame = formation_indicator_frame(source, end - 1)
+    if len(indicator_frame) < end:
+        raise ValueError("Jumlah indikator telemetri kurang dari jumlah sampel")
+    records = []
+    previous = base
+    profile = params["formation_profile"]
+    cap = float(params.get("shadow_wob_ceiling_kn", 30.0))
+    ramp = float(params.get("shadow_ramp_pct", 2.0))
+    for i in range(end):
+        sig = indicator_frame.iloc[i]
+        signal = {"status": sig["Indikasi"], "torque_ratio": sig["Rasio_Torque_per_WOB"]}
+        zone = formation_zone(profile, i, len(source))
+        item = shadow_wob_step(base, zone, signal, previous, ceiling_kn=cap,
+                               ramp_pct=ramp)
+        previous = item["recommendation"]
+        depth = float(source.iloc[i]["Depth_m"]) if "Depth_m" in source else float("nan")
+        records.append({
+            "Baris": i + 1, "Depth_m": depth, "Zona_skenario": item["zone"],
+            "WOB_mentah_kN": float(source.iloc[i]["WOB"]),
+            "WOB_dasar_kN": base, "WOB_kandidat_kN": item["candidate"],
+            "WOB_setelah_guard_kN": item["guarded"],
+            "WOB_shadow_kN": item["recommendation"],
+            "Indikasi_telemetri": item["status"], "Alasan_guard": item["reason"],
+        })
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def cached_shadow_wob_history(source, formation_profile, base_wob,
+                              ceiling_kn, ramp_pct):
+    # Param dinyatakan eksplisit pada cache-key agar perubahan admin tercermin.
+    cfg = {"formation_profile": formation_profile, "ap_wob_sp": base_wob,
+           "shadow_wob_ceiling_kn": ceiling_kn, "shadow_ramp_pct": ramp_pct}
+    evidence = cached_formation_indicators(source)
+    return shadow_wob_history(source, cfg, len(source) - 1, evidence)
+
+
+# ==========================================================
 # CALLBACK WIDGET (dipanggil saat pengguna mengubah sesuatu)
 # ==========================================================
 def _touch():
@@ -2432,7 +2558,7 @@ st.markdown(_h(f"""
 <div class="ews-header">
   <div>
     <div class="ews-title">PDSI | Adaptive Drilling Research</div>
-    <div class="ews-sub">Co-Simulation HMI · EWS · Fuzzy-PID | Fase 1</div>
+    <div class="ews-sub">Co-Simulation HMI · EWS · Fuzzy-PID | Fase 2 (SHADOW)</div>
   </div>
   <div>
     <span class="tag sim">Simulasi / playback</span>
@@ -2496,7 +2622,7 @@ if field_data is None:
 # Registrasinya dilakukan SETELAH seluruh tampilan selesai dirender (lihat akhir file),
 # agar tidak bergantung pada komponen iframe streamlit-autorefresh.
 # Halaman pengaturan tetap bebas dari refresh paksa ketika admin mengedit parameter.
-LIVE_REFRESH_VIEWS = {"Kabin Driller", "Dasbor EWS", "Dasbor Fuzzy-PID", "Skenario Formasi", "Hasil Penelitian"}
+LIVE_REFRESH_VIEWS = {"Kabin Driller", "Dasbor EWS", "Dasbor Fuzzy-PID", "Skenario Formasi", "Generator WOB Adaptif", "Hasil Penelitian"}
 LIVE_REFRESH_INTERVAL = 2.0 if view == "Dasbor Fuzzy-PID" else 1.0
 
 # Ambil nilai parameter bersama terbaru.
@@ -2508,6 +2634,8 @@ with shared["lock"]:
 # Samakan nilai widget dengan nilai bersama SEBELUM widget dibuat.
 st.session_state["w_scenario"] = current["scenario"]
 st.session_state["w_formation_profile"] = current["formation_profile"]
+st.session_state["w_shadow_cap"] = float(current.get("shadow_wob_ceiling_kn", 30.0))
+st.session_state["w_shadow_ramp"] = float(current.get("shadow_ramp_pct", 2.0))
 st.session_state["w_interval"] = current["interval"]
 st.session_state["w_batch_size"] = current["batch_size"]
 st.session_state["w_auto"] = current["auto"]
@@ -2550,7 +2678,7 @@ def inline_warning(condition, text):
 # shared cache_resource sebelum widget dibuat sehingga pindah halaman aman.
 if view == "Persiapan Simulasi":
     st.subheader("01 · Persiapan eksperimen")
-    st.info("Urutan: pilih data → tentukan profil uji → pilih mode Fuzzy-PID → jalankan playback. Profil batuan fase ini hanya label ilustratif; tidak mengubah data atau setpoint.")
+    st.info("Urutan: pilih data → profil formasi → jalankan playback → periksa Generator WOB Adaptif (SHADOW) → evaluasi Fuzzy-PID dan EWS. Profil batuan tidak mengubah data dan tidak mengendalikan Fuzzy-PID.")
     if not is_admin:
         st.caption("Akses viewer: pengaturan dapat dilihat tetapi tidak dapat diubah.")
     st.selectbox(
@@ -2594,6 +2722,16 @@ if view == "Persiapan Simulasi":
         on_change=update_param, args=("formation_profile", "w_formation_profile"),
     )
     st.caption("Drillability relatif: lunak 1,00 · sedang 0,70 · keras 0,45. Angka ini adalah koefisien ilustrasi, bukan UCS atau data litologi NEAC-001.")
+    with st.expander("Fase 2 · Batas evaluasi WOB adaptif (SHADOW)"):
+        st.info("Nilai di bawah hanya mengubah rekomendasi di halaman Generator WOB Adaptif. "
+                "Tidak mengubah WOB perintah Fuzzy-PID atau data telemetri.")
+        st.number_input("Batas atas WOB pratinjau (kN)", min_value=1.0, max_value=100.0,
+                        step=1.0, key="w_shadow_cap", disabled=locked,
+                        on_change=update_param, args=("shadow_wob_ceiling_kn", "w_shadow_cap"))
+        st.number_input("Maksimum perubahan WOB tiap sampel (%)", min_value=0.1, max_value=10.0,
+                        step=0.5, key="w_shadow_ramp", disabled=locked,
+                        on_change=update_param, args=("shadow_ramp_pct", "w_shadow_ramp"))
+        st.caption("Nilai standar hanya asumsi demonstrasi; bukan batas beban rig PDSI.")
     with st.expander("Pengaturan auto pilot (Fuzzy-PID)"):
         st.caption(
             "Setpoint yang dipertahankan pengendali. Pengereman putaran aktif saat "
@@ -2638,7 +2776,7 @@ if view == "Persiapan Simulasi":
               on_click=jump_to_last, key="phase1_jump")
 
 if view == "Pengaturan Sistem":
-    st.subheader("07 · Pengaturan EWS dan diagnostik")
+    st.subheader("08 · Pengaturan EWS dan diagnostik")
     st.caption("Hanya admin yang dapat mengubah parameter. Semua perubahan berlaku pada sesi server yang sama.")
     with st.expander("Ambang alarm (demonstrasi)"):
         for parameter in PARAMETERS:
@@ -2762,6 +2900,7 @@ is_ews = view == "Dasbor EWS"
 is_fuzzy = view == "Dasbor Fuzzy-PID"
 is_setup = view == "Persiapan Simulasi"
 is_formation = view == "Skenario Formasi"
+is_shadow = view == "Generator WOB Adaptif"
 is_results = view == "Hasil Penelitian"
 is_settings = view == "Pengaturan Sistem"
 
@@ -2921,7 +3060,7 @@ if is_setup:
     b.metric("Playback", "RUNNING" if params["auto"] else "PAUSED")
     c.metric("Pengendali", "Fuzzy-PID ON" if ap_on else "Fuzzy-PID OFF")
     st.caption("Setelah memeriksa konfigurasi, pilih Kabin Driller untuk monitoring atau Skenario Formasi untuk mengevaluasi indikasi telemetri.")
-    st.info("Model Bingham, identifikasi litologi terverifikasi, dan perubahan setpoint WOB berbasis zona batuan belum diaktifkan pada Fase 1.")
+    st.info("Fase 2 menghitung usulan WOB dalam mode SHADOW saja. Bingham, identifikasi litologi tervalidasi, dan kendali WOB adaptif closed-loop belum aktif.")
 
 if is_cabin or is_ews or is_fuzzy:
     st.markdown("### Ringkasan penelitian formasi")
@@ -2935,7 +3074,7 @@ if is_cabin or is_ews or is_fuzzy:
 
 if is_formation:
     st.subheader("05 · Skenario formasi lunak–sedang–keras")
-    st.warning("LABEL SKENARIO ≠ LITOLOGI NYATA. Zona dibuat menurut persentase indeks playback, bukan hasil logging/UCS. Skenario ini hanya memengaruhi label HMI dan unduhan CSV; tidak memodifikasi dataset, alarm, atau pengendali Fuzzy-PID.")
+    st.warning("LABEL SKENARIO ≠ LITOLOGI NYATA. Zona dibuat menurut persentase indeks playback, bukan hasil logging/UCS. Skenario memengaruhi label HMI, evaluasi WOB SHADOW, dan unduhan CSV; tidak memodifikasi dataset, alarm, atau perintah Fuzzy-PID.")
     a, c = st.columns(2)
     a.metric("Zona ilustratif saat ini", formation_now or "Tidak dipilih")
     c.metric("Sampel", f"{index+1}/{n}")
@@ -2965,7 +3104,7 @@ if is_formation:
                       y="Drillability_relatif", height=200)
         st.caption("Tingkat 1,00 = lunak; 0,70 = sedang; 0,45 = keras. "
                    "Kurva ini DITETAPKAN dari skenario, BUKAN hasil pengukuran litologi/UCS, "
-                   "dan tidak memengaruhi setpoint WOB pada fase ini.")
+                   "serta tidak mengubah setpoint WOB aktual Fuzzy-PID (hanya rekomendasi SHADOW).")
         st.download_button("Unduh skenario hipotetis CSV", schedule.to_csv(index=False).encode("utf-8-sig"),
                            "profil_formasi_hipotetis.csv", "text/csv", key="formation_schedule_download")
     st.markdown("**Tren telemetri asli mengikuti kedalaman / indeks playback**")
@@ -3000,8 +3139,62 @@ if is_formation:
         st.download_button("Unduh indikator telemetri CSV", frame.to_csv(index=False).encode("utf-8-sig"),
                            "indikasi_formasi_telemetri.csv", "text/csv", key="formation_evidence_download")
 
+if is_shadow:
+    st.subheader("06 · Generator WOB adaptif (SHADOW)")
+    st.info("FASE 2: rekomendasi WOB hanya dihitung dan dicatat. Tidak dikirim ke "
+            "Fuzzy-PID, tidak mengubah replay NEAC-001, dan belum menggunakan plant Bingham.")
+    hist_shadow_all = cached_shadow_wob_history(
+        simulation_data, params["formation_profile"],
+        float(params["ap_wob_sp"]), float(params.get("shadow_wob_ceiling_kn", 30.0)),
+        float(params.get("shadow_ramp_pct", 2.0)))
+    hist_shadow = hist_shadow_all.iloc[:index + 1].copy()
+    last_shadow = hist_shadow.iloc[-1]
+    # Hanya status LANGKAH SEKARANG memiliki penilaian EWS aktual.
+    # Gunakan nilai akhir dari sampel SEBELUMNYA. Tidak menghitung dua kali
+    # batas ramp untuk sampel yang sama setiap refresh.
+    previous_shadow = (float(hist_shadow.iloc[-2]["WOB_shadow_kN"])
+                       if len(hist_shadow) > 1 else float(params["ap_wob_sp"]))
+    current_shadow = shadow_wob_step(
+        params["ap_wob_sp"], formation_now, formation_signal,
+        previous_shadow,
+        ceiling_kn=params.get("shadow_wob_ceiling_kn", 30.0),
+        ramp_pct=params.get("shadow_ramp_pct", 2.0),
+        ews_level=level, fault=bool(snap["fault_keys"] or snap["bad_sensors"] or snap["stale"]))
+    st.caption(f"Sampel {index+1}/{n} · Zona: {formation_now or 'TANPA LABEL'} · "
+               f"Indikasi: {formation_signal['status']} · EWS: {LEVELS[level]['name']}")
+    a,b,c,d = st.columns(4)
+    a.metric("WOB dasar Fuzzy-PID", f"{float(params['ap_wob_sp']):.2f} kN")
+    b.metric("Kandidat dari zona", f"{current_shadow['candidate']:.2f} kN")
+    c.metric("Target shadow historis", f"{float(last_shadow['WOB_shadow_kN']):.2f} kN")
+    d.metric("Saran setelah EWS kini", f"{current_shadow['recommendation']:.2f} kN")
+    st.markdown("**Alasan pembatas rekomendasi saat ini**")
+    st.write(current_shadow["reason"])
+    st.caption("Perubahan tiap sampel dibatasi sebagai asumsi simulasi. Nilai WOB dasar "
+               "Fuzzy-PID tetap; saran EWS berlaku untuk langkah saat ini saja. "
+               "Riwayat pada grafik tidak merekonstruksi EWS masa lalu.")
+    st.markdown("**Perbandingan WOB mentah, kandidat formasi, dan pratinjau ramp**")
+    plot = hist_shadow.tail(120).copy()
+    axis = "Baris"
+    depths = pd.to_numeric(plot["Depth_m"], errors="coerce").to_numpy(dtype=float)
+    if np.isfinite(depths).all() and (len(depths) < 2 or np.all(np.diff(depths) > 0)):
+        axis = "Kedalaman TMD (m)"
+        plot[axis] = depths
+    call_wide(st.line_chart, plot, x=axis,
+              y=["WOB_mentah_kN", "WOB_dasar_kN", "WOB_kandidat_kN", "WOB_shadow_kN"],
+              height=300)
+    st.caption("Kandidat ditentukan oleh zona ilustratif. Garis shadow menunjukkan target "
+               "setelah pembatas telemetri dan ramp, tanpa guard EWS historis. "
+               "Garis WOB mentah adalah input replay, bukan respons terhadap rekomendasi ini.")
+    st.markdown("**Riwayat rekomendasi yang dapat diaudit**")
+    call_wide(st.dataframe, hist_shadow.tail(20), hide_index=True)
+    st.download_button("Unduh evaluasi WOB shadow CSV", hist_shadow.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="wob_adaptif_shadow_fase2.csv", mime="text/csv",
+                       key="shadow_export_csv")
+    st.warning("Koefisien 0,90/1,00/1,10, batas WOB, dan ramp adalah parameter eksperimen. "
+               "Belum tervalidasi sebagai rekomendasi operasi rig dan tidak membuktikan mitigasi NPT.")
+
 if is_results:
-    st.subheader("06 · Hasil penelitian sementara")
+    st.subheader("07 · Hasil penelitian sementara")
     st.info("Hasil yang ditampilkan adalah evaluasi playback dan output model Fuzzy-PID sebelumnya, belum pembuktian peningkatan ROP lapangan atau mitigasi NPT.")
     a,b,c = st.columns(3)
     a.metric("Sampel ditinjau", f"{index+1}/{n}")
@@ -3010,7 +3203,7 @@ if is_results:
     st.write("**Metadata eksperimen**")
     st.json({"dataset": scenario, "samples_total": n, "samples_played": index+1,
              "formation_profile": params["formation_profile"], "controller_mode": "Fuzzy-PID" if ap_on else "Baseline",
-             "disclaimer": "Label formasi hipotetis; tidak ada plant Bingham maupun adaptive formation setpoint pada fase ini"})
+             "disclaimer": "Saran WOB fase 2 adalah SHADOW, tidak mengontrol Fuzzy-PID atau plant Bingham."})
     if ap_view and ap_view["hist"]["t"]:
         hist = ap_view["hist"]
         report = pd.DataFrame({k: v for k,v in hist.items() if k != "t"})
@@ -3021,6 +3214,7 @@ if is_results:
                            file_name="hasil_fuzzy_pid_fase1.csv", mime="text/csv", key="results_fpid_download")
     else:
         st.caption("Aktifkan Fuzzy-PID dan jalankan playback untuk mengumpulkan hasil model.")
+    st.caption("Evaluasi WOB adaptif tersedia di menu Generator WOB Adaptif dan CSV khusus SHADOW.")
     st.download_button("Unduh replay dataset CSV", visible.to_csv(index=False).encode("utf-8-sig"),
                        file_name="replay_data_neac001.csv", mime="text/csv", key="results_raw_download")
 
