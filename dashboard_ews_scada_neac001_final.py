@@ -448,6 +448,7 @@ CABIN_CSS = """
 .gauge .g-value{font-size:28px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--text)}
 .gauge .g-unit{font-size:12px;font-weight:600;color:var(--muted);margin-left:4px}
 .gauge .g-sub{font-size:11px;color:var(--muted);margin-top:4px}
+.gauge .g-ref{font-size:11px;font-weight:700;color:var(--accent);margin-top:5px;white-space:normal;overflow-wrap:anywhere;min-height:28px}
 .annun{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
 .lamp{padding:10px 6px;border-radius:4px;text-align:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--border);background:var(--surface2);color:var(--muted);min-width:0}
 .lamp.ok{border-color:var(--lv0);color:var(--lv0);background:var(--surface)}
@@ -1886,6 +1887,29 @@ def cached_shadow_wob_history(source, formation_profile, base_wob,
     return shadow_wob_history(source, cfg, len(source) - 1, evidence)
 
 
+def current_shadow_snapshot(source, params, index, formation_now,
+                            formation_signal, ews_level, fault=False):
+    """Satu sumber rekomendasi WOB untuk Kabin dan Generator WOB Adaptif.
+
+    SHADOW: faktor zona HIPOTETIS + indikator telemetri + guard EWS kini.
+    Belum merupakan setpoint aktif Fuzzy-PID atau estimasi litologi depan bit.
+    """
+    history_all = cached_shadow_wob_history(
+        source, params["formation_profile"],
+        float(params["ap_wob_sp"]), float(params.get("shadow_wob_ceiling_kn", 30.0)),
+        float(params.get("shadow_ramp_pct", 2.0)))
+    upto = max(0, min(int(index), len(history_all) - 1))
+    history = history_all.iloc[:upto + 1].copy()
+    prev_wob = (float(history.iloc[-2]["WOB_shadow_kN"])
+                if len(history) >= 2 else float(params["ap_wob_sp"]))
+    current = shadow_wob_step(
+        params["ap_wob_sp"], formation_now, formation_signal, prev_wob,
+        ceiling_kn=params.get("shadow_wob_ceiling_kn", 30.0),
+        ramp_pct=params.get("shadow_ramp_pct", 2.0),
+        ews_level=ews_level, fault=fault)
+    return current, history
+
+
 # ==========================================================
 # CALLBACK WIDGET (dipanggil saat pengguna mengubah sesuatu)
 # ==========================================================
@@ -2356,8 +2380,13 @@ def _arc(cx, cy, r, f0, f1):
     return f"M{x0:.2f} {y0:.2f} A{r} {r} 0 0 1 {x1:.2f} {y1:.2f}"
 
 
-def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None):
-    """Satu gauge setengah lingkaran dengan zona hijau/kuning/merah/magenta."""
+def gauge_html(parameter, value, limits, level, bad, rate_text,
+               ap_value=None, target_label=None):
+    """Jarum hitam=data mentah; titik biru=target yang jelas namanya.
+
+    Warna zona dan alarm dihitung dari telemetri mentah, BUKAN titik target.
+    Untuk WOB, target rekomendasi SHADOW belum dikirim ke Fuzzy-PID.
+    """
     name = SHORT_NAME[parameter]
     decimals = DECIMALS[parameter]
     css = "lverr" if bad else f"lv{level}"
@@ -2397,7 +2426,8 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None):
         shown = _num(value, decimals)
 
     marker = ""
-    if ap_value is not None and np.isfinite(float(ap_value)) and not bad:
+    # Jangan menggambar titik yang tidak memiliki target/arti operasional jelas.
+    if target_label and ap_value is not None and np.isfinite(float(ap_value)) and not bad:
         a_angle = math.pi * (1.0 - frac(ap_value))
         mx, my = cx + (radius + 1) * math.cos(a_angle), cy - (radius + 1) * math.sin(a_angle)
         marker = (
@@ -2414,11 +2444,18 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None):
         + "</svg>"
     )
     chip_text = "SENSOR ERROR" if bad else LEVELS[level]["name"]
+    target_html = ""
+    if marker:
+        target_text = html.escape(str(target_label))
+        target_html = (
+            f'<div class="g-ref">&#9679; {target_text}: '
+            f'{_num(ap_value, decimals)} {html.escape(UNITS[parameter])}</div>'
+        )
     return (
         f'<div class="gauge {css}"><div class="g-label">{name}</div>{svg}'
         f'<div class="g-value">{shown}<span class="g-unit">{UNITS[parameter]}</span></div>'
         f'<div class="chip {css}">{chip_text}</div>'
-        f'<div class="g-sub">{rate_text}</div></div>'
+        f'<div class="g-sub">{rate_text}</div>{target_html}</div>'
     )
 
 
@@ -3143,23 +3180,12 @@ if is_shadow:
     st.subheader("06 · Generator WOB adaptif (SHADOW)")
     st.info("FASE 2: rekomendasi WOB hanya dihitung dan dicatat. Tidak dikirim ke "
             "Fuzzy-PID, tidak mengubah replay NEAC-001, dan belum menggunakan plant Bingham.")
-    hist_shadow_all = cached_shadow_wob_history(
-        simulation_data, params["formation_profile"],
-        float(params["ap_wob_sp"]), float(params.get("shadow_wob_ceiling_kn", 30.0)),
-        float(params.get("shadow_ramp_pct", 2.0)))
-    hist_shadow = hist_shadow_all.iloc[:index + 1].copy()
+    # Kabin Driller memanggil fungsi yang sama agar titik biru WOB konsisten
+    # dengan angka rekomendasi di halaman ini pada sampel yang sama.
+    current_shadow, hist_shadow = current_shadow_snapshot(
+        simulation_data, params, index, formation_now, formation_signal,
+        level, bool(snap["fault_keys"] or snap["bad_sensors"] or snap["stale"]))
     last_shadow = hist_shadow.iloc[-1]
-    # Hanya status LANGKAH SEKARANG memiliki penilaian EWS aktual.
-    # Gunakan nilai akhir dari sampel SEBELUMNYA. Tidak menghitung dua kali
-    # batas ramp untuk sampel yang sama setiap refresh.
-    previous_shadow = (float(hist_shadow.iloc[-2]["WOB_shadow_kN"])
-                       if len(hist_shadow) > 1 else float(params["ap_wob_sp"]))
-    current_shadow = shadow_wob_step(
-        params["ap_wob_sp"], formation_now, formation_signal,
-        previous_shadow,
-        ceiling_kn=params.get("shadow_wob_ceiling_kn", 30.0),
-        ramp_pct=params.get("shadow_ramp_pct", 2.0),
-        ews_level=level, fault=bool(snap["fault_keys"] or snap["bad_sensors"] or snap["stale"]))
     st.caption(f"Sampel {index+1}/{n} · Zona: {formation_now or 'TANPA LABEL'} · "
                f"Indikasi: {formation_signal['status']} · EWS: {LEVELS[level]['name']}")
     a,b,c,d = st.columns(4)
@@ -3227,6 +3253,10 @@ if is_cabin:
         hist_c = ap_view["hist"]
         ap_last = {name: hist_c[f"ap_{name}"][-1] for name in AP_CHANNEL_LIST}
 
+    current_wob_shadow, _ = current_shadow_snapshot(
+        simulation_data, params, index, formation_now, formation_signal,
+        level, bool(snap["fault_keys"] or snap["bad_sensors"] or snap["stale"]))
+
     with sec_cabin:
         slot_stats = st.empty()
         slot_gauges = st.empty()
@@ -3252,11 +3282,21 @@ if is_cabin:
         ]
         slot_stats.markdown(_h('<div class="cabin-bar">' + "".join(stats) + "</div>"), unsafe_allow_html=True)
 
-        # --- gauge utama ---
+        # --- gauge utama: pisahkan data MENTAH, target, dan hasil model ---
+        # WOB: target adaptif rekomendasi SHADOW; belum dikirim ke kontroler.
+        # ROP: target penelitian ap_rop_target; BUKAN keluaran ap_ROP.
+        # RPM: target nominal ap_rpm_sp; belum adaptif terhadap formasi.
+        # Torque/SPP: hanya pengukuran (tidak memiliki target adaptif).
+        gauge_targets = {
+            "WOB": (current_wob_shadow["recommendation"], "TARGET ADAPTIF (SHADOW)"),
+            "ROP": (float(params["ap_rop_target"]), "TARGET ROP"),
+            "RPM": (float(params["ap_rpm_sp"]), "TARGET RPM NOMINAL"),
+        }
         gauges = []
         for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
             bad = parameter in bad_sensors
             rate_text = f"Laju {rates[parameter]:+.1f} per menit" if parameter in rates else "&nbsp;"
+            target, target_caption = gauge_targets.get(parameter, (None, None))
             gauges.append(
                 gauge_html(
                     parameter,
@@ -3265,10 +3305,24 @@ if is_cabin:
                     signal_levels.get(parameter, 0),
                     bad,
                     rate_text,
-                    ap_last[parameter] if (ap_last and ap_on) else None,
+                    target, target_caption,
                 )
             )
         slot_gauges.markdown(_h('<div class="cabin-gauges">' + "".join(gauges) + "</div>"), unsafe_allow_html=True)
+        st.caption(
+            "**Cara baca:** jarum hitam/angka = data replay NEAC-001; titik biru = target "
+            "yang tertulis di tiap gauge. **WOB biru adalah rekomendasi adaptif SHADOW, "
+            "belum perintah Fuzzy-PID.** ROP biru = target ROP penelitian, bukan ROP "
+            "hasil model. RPM biru = target nominal. Torque dan SPP tanpa target. "
+            "Status warna EWS menilai data mentah, bukan titik biru."
+        )
+        st.info(
+            f"**Alur sederhana:** zona simulasi **{formation_now or 'TANPA LABEL'}** · "
+            f"indikasi telemetri **{formation_signal['status']}** · "
+            f"rekomendasi WOB **{current_wob_shadow['recommendation']:.2f} kN** "
+            f"(SHADOW, belum menggerakkan kontroler). "
+            f"Alasan: {current_wob_shadow['reason']}"
+        )
 
         # --- annunciator ---
         brake_now = float(ap_view["brake"]) if ap_view else 0.0
