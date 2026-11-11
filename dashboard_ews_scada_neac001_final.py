@@ -516,6 +516,154 @@ PRESENTATION_CSS = """
 @media(max-width:670px){.cabin-gauges{grid-template-columns:repeat(1,minmax(0,1fr))}.decision-grid{grid-template-columns:repeat(2,1fr)}.gauge{min-height:unset}}
 """
 
+
+
+# ==========================================================
+# VISUAL SCADA V2 — HANYA CSS, TANPA PERUBAHAN ALGORITMA
+# ==========================================================
+SCADA_VISUAL_CSS = """
+/* Panel status besar, tetapi tetap ringkas dan mudah dipahami */
+:root{--scada-blue:#1689c8;--scada-gold:#d9a127}
+[data-testid="stMainBlockContainer"], .block-container{max-width:1480px;padding-top:2rem}
+.ews-header{position:relative;padding:16px 20px;border-radius:11px;
+  border:1px solid var(--border);border-left:6px solid var(--accent);
+  background:linear-gradient(115deg,color-mix(in srgb,var(--accent) 13%,var(--surface)),var(--surface) 64%);
+  box-shadow:0 4px 18px rgba(10,20,40,.05)}
+.ews-title{font-size:clamp(17px,1.65vw,24px);letter-spacing:.045em}
+.ews-sub{color:var(--muted);letter-spacing:.065em;font-size:11px}
+.tag{border-radius:999px;padding:6px 11px;font-size:10px}
+.tag.sim{background:color-mix(in srgb,var(--lv1) 13%,var(--surface));color:var(--lv1)}
+.notice{border-radius:8px;background:color-mix(in srgb,var(--lv1) 7%,var(--surface));
+  border-left-width:4px;line-height:1.5;padding:10px 14px}
+
+/* Mode dan navigasi: terlihat seperti pilihan kontrol, tidak seperti radio teks */
+.st-key-view_mode div[role="radiogroup"]{display:flex;flex-wrap:wrap;gap:9px;padding:6px;
+  border:1px solid var(--border);border-radius:12px;background:var(--surface)}
+.st-key-view_mode label{background:var(--surface2);padding:9px 13px;border:1px solid var(--border);
+  border-radius:9px;min-height:40px;flex:1;white-space:normal;transition:background .15s ease}
+.st-key-view_mode label:has(input:checked){background:color-mix(in srgb,var(--accent) 15%,var(--surface));
+  border-color:var(--accent)}
+.st-key-view_mode label p{font-size:13px;font-weight:750}
+
+/* Status EWS memiliki warna solid sebagaimana HMI lama, tidak hanya tulisan */
+.status-hero{--c:var(--lv0);--pn:#16803C;display:grid;grid-template-columns:minmax(0,1fr) auto;
+  gap:10px 18px;align-items:center;background:linear-gradient(115deg,var(--pn),color-mix(in srgb,var(--pn) 80%,#14293e));
+  border-radius:11px;padding:16px 22px;color:white;margin:10px 0 14px;min-height:104px;
+  box-shadow:0 6px 22px rgba(12,27,44,.11)}
+.status-hero.lv1{color:#1b180b;background:linear-gradient(115deg,#f3bd3c,#ffd880)}
+.status-hero.lv2{background:linear-gradient(115deg,#bf2c32,#e65b54)}
+.status-hero.lv3{background:linear-gradient(115deg,#91137d,#c334ac)}
+.status-hero.lverr{background:linear-gradient(115deg,#475569,#75849a)}
+.status-kicker-new{font-size:10px;letter-spacing:.13em;font-weight:800;text-transform:uppercase;opacity:.87}
+.status-main-new{font-size:clamp(23px,2.5vw,34px);font-weight:850;letter-spacing:.025em;line-height:1.2;margin:3px 0}
+.status-explain-new{font-size:12px;opacity:.91;line-height:1.45}
+.status-side-new{text-align:right;font-size:12px;line-height:1.8;font-weight:650;max-width:390px}
+.status-mode-new{display:inline-block;border:1px solid rgba(255,255,255,.6);
+  padding:2px 10px;border-radius:999px;margin-bottom:6px;font-size:11px}
+.status-hero.lv1 .status-mode-new{border-color:rgba(20,20,20,.4)}
+
+/* Headings yang kuat tetapi tidak menumpuk ruang vertikal */
+.ui-section{border-left:5px solid var(--accent);border-bottom:1px solid var(--border);
+  border-radius:4px;padding:6px 0 7px 13px;margin:12px 0 11px}
+.ui-section .ui-section-title{font-size:clamp(19px,2vw,27px);font-weight:850;
+  line-height:1.2;letter-spacing:-.01em;color:var(--text)}
+.ui-section .ui-section-sub{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45}
+.ui-section.tone-blue{border-left-color:var(--accent)}
+.ui-section.tone-green{border-left-color:var(--lv0)}
+.ui-section.tone-red{border-left-color:var(--lv2)}
+
+/* Kartu ringkas untuk metrik yang dahulu hanya angka polos */
+.ui-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:8px 0 14px}
+.ui-kpi-grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.ui-kpi-grid.cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.ui-kpi{--tone:var(--accent);position:relative;min-width:0;background:
+  linear-gradient(125deg,color-mix(in srgb,var(--tone) 10%,var(--surface)),var(--surface) 80%);
+  border:1px solid color-mix(in srgb,var(--tone) 35%,var(--border));border-radius:11px;
+  border-top:4px solid var(--tone);padding:15px 16px;overflow:hidden}
+.ui-kpi.tone-blue{--tone:var(--accent)}.ui-kpi.tone-green{--tone:var(--lv0)}
+.ui-kpi.tone-amber{--tone:var(--lv1)}.ui-kpi.tone-red{--tone:var(--lv2)}
+.ui-kpi.tone-magenta{--tone:var(--lv3)}.ui-kpi.tone-neutral{--tone:var(--muted)}
+.ui-kpi .ui-kpi-label{color:var(--muted);font-size:11px;text-transform:uppercase;
+  font-weight:750;letter-spacing:.055em;line-height:1.35}
+.ui-kpi .ui-kpi-value{font-size:clamp(20px,2vw,29px);color:var(--text);font-weight:850;
+  line-height:1.15;margin-top:7px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ui-kpi .ui-kpi-desc{color:var(--muted);font-size:11px;line-height:1.3;margin-top:6px}
+
+/* Kartu status per kanal: hijau/kuning/merah/magenta langsung terlihat */
+.channel-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:12px 0 16px}
+.channel-card{--tone:var(--lv0);border:1px solid color-mix(in srgb,var(--tone) 42%,var(--border));
+  background:linear-gradient(125deg,color-mix(in srgb,var(--tone) 14%,var(--surface)),var(--surface) 85%);
+  border-top:5px solid var(--tone);border-radius:10px;padding:13px 12px;min-width:0}
+.channel-card.lv1{--tone:var(--lv1)}.channel-card.lv2{--tone:var(--lv2)}
+.channel-card.lv3{--tone:var(--lv3)}.channel-card.lverr{--tone:var(--lverr)}
+.channel-name{font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.07em}
+.channel-status{font-size:clamp(16px,1.7vw,23px);font-weight:900;color:var(--tone);
+  overflow-wrap:anywhere;margin:9px 0 5px;letter-spacing:.025em}
+.channel-reading{font-size:12px;color:var(--text);font-variant-numeric:tabular-nums}
+
+/* Gauge: mempertahankan skala, jarum, setpoint, dan zona yang sudah ada */
+.cabin-stat{background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--accent);
+  border-radius:10px;padding:13px 15px;box-shadow:0 2px 12px rgba(10,20,40,.035)}
+.cabin-stat .k{font-size:11px}.cabin-stat .v{font-size:clamp(20px,2vw,27px)}
+.cabin-stat .bar{height:6px;margin-top:10px}
+.cabin-gauges{gap:14px;margin:12px 0 8px}
+.gauge{background:linear-gradient(180deg,color-mix(in srgb,var(--c) 7%,var(--surface)),var(--surface) 45%);
+  border:1px solid color-mix(in srgb,var(--c) 35%,var(--border));border-top:5px solid var(--c);
+  border-radius:12px;padding:14px 18px;min-height:0;box-shadow:0 3px 16px rgba(10,20,40,.055)}
+.gauge .g-label{font-size:13px;font-weight:850}
+.gauge svg{max-height:210px;margin:0 auto}
+.gauge .g-value{font-size:clamp(26px,2.5vw,35px);margin-bottom:6px}
+.gauge .g-sub{font-size:11px;margin-top:10px}
+.gauge .chip{background:color-mix(in srgb,var(--c) 12%,var(--surface));
+  border:1px solid color-mix(in srgb,var(--c) 40%,var(--border));
+  padding:5px 10px;border-radius:999px;justify-content:center}
+
+/* Keputusan Fuzzy diberi warna sesuai arah keputusan tanpa memengaruhi logika */
+.decision-panel{--decision-color:var(--accent);background:linear-gradient(115deg,
+  color-mix(in srgb,var(--decision-color) 13%,var(--surface)),var(--surface) 70%);
+  border:1px solid color-mix(in srgb,var(--decision-color) 40%,var(--border));
+  border-left:6px solid var(--decision-color);border-radius:12px;padding:17px 19px;margin:15px 0}
+.decision-panel.action-up{--decision-color:var(--lv0)}
+.decision-panel.action-down{--decision-color:var(--lv2)}
+.decision-panel.action-hold{--decision-color:var(--accent)}
+.decision-grid>div{border:1px solid var(--border);border-radius:9px;
+  background:color-mix(in srgb,var(--decision-color) 6%,var(--surface));min-width:0}
+.decision-value{color:var(--text);font-size:clamp(17px,2vw,25px);overflow-wrap:anywhere}
+.decision-reason{border-top:1px solid var(--border);padding-top:11px;margin-top:13px}
+.ui-reason{border:1px solid color-mix(in srgb,var(--accent) 42%,var(--border));
+  border-left:5px solid var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--surface));
+  border-radius:9px;padding:12px 15px;font-size:14px;line-height:1.5;color:var(--text);margin:8px 0}
+.ui-reason b{color:var(--accent)}
+.ui-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--muted);
+  padding:8px 11px;margin:4px 0 10px;border:1px dashed var(--border);border-radius:8px}
+.ui-legend .spot{display:inline-block;width:9px;height:9px;border-radius:100%;margin-right:6px}
+
+/* Grafik dan panel: beri ritme dan pemisahan tanpa menambah dashboard */
+[data-testid="stImage"] img{border:1px solid var(--border);border-radius:11px;background:var(--surface)}
+[data-testid="stExpander"]{border-radius:10px;background:var(--surface)}
+[data-testid="stTabs"] button[role="tab"]{font-weight:750;padding:9px 16px}
+[data-testid="stTabs"] button[aria-selected="true"]{color:var(--accent)}
+[data-testid="stSidebar"]{background:var(--surface)}
+[data-testid="stSidebar"] [data-testid="stSelectbox"]{margin-bottom:4px}
+[data-testid="stSidebar"] .side-title{color:var(--accent);border-bottom:2px solid var(--border);padding-bottom:9px}
+
+@media(max-width:1100px){
+ .ui-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .channel-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:680px){
+ .status-hero{grid-template-columns:1fr;padding:13px 15px}
+ .status-side-new{text-align:left}
+ .channel-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .cabin-gauges{grid-template-columns:1fr}
+ .ui-kpi-grid,.ui-kpi-grid.cols-3,.ui-kpi-grid.cols-2{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ .ui-kpi{padding:11px 10px}
+ .ui-kpi .ui-kpi-value{font-size:20px}
+ .decision-grid{grid-template-columns:1fr}
+ .st-key-view_mode label{flex:1 0 100%}
+}
+"""
+
 def build_css(mode):
     """CSS tema. Jika mode tidak terdeteksi, ikuti pengaturan sistem (OS)."""
     if mode in PALETTES:
@@ -526,7 +674,7 @@ def build_css(mode):
             "@media (prefers-color-scheme: light){:root{"
             + _palette_vars(PALETTES["light"]) + "}}"
         )
-    return "<style>" + root + BASE_CSS + CABIN_CSS + PRESENTATION_CSS + "</style>"
+    return "<style>" + root + BASE_CSS + CABIN_CSS + PRESENTATION_CSS + SCADA_VISUAL_CSS + "</style>"
 
 
 THEME = detect_theme()
@@ -2273,6 +2421,42 @@ def notice(text, kind=""):
     return _h(f'<div class="notice {kind}">{text}</div>')
 
 
+
+
+def ui_section(title, subtitle="", tone="blue"):
+    """Tampilan heading SCADA; tidak melakukan perubahan state atau perhitungan."""
+    safe_title = html.escape(str(title))
+    safe_sub = html.escape(str(subtitle))
+    t = tone if tone in ("blue", "green", "red") else "blue"
+    subtitle_html = f'<div class="ui-section-sub">{safe_sub}</div>' if safe_sub else ""
+    return _h(f'<div class="ui-section tone-{t}"><div class="ui-section-title">'
+              f'{safe_title}</div>{subtitle_html}</div>')
+
+
+def ui_kpi(label, value, tone="blue", detail=""):
+    """Kartu visual saja. Seluruh nilai dibaca dari perhitungan yang sudah ada."""
+    allowed = {"blue", "green", "amber", "red", "magenta", "neutral"}
+    t = tone if tone in allowed else "neutral"
+    desc = (f'<div class="ui-kpi-desc">{html.escape(str(detail))}</div>'
+            if detail else "")
+    return (f'<div class="ui-kpi tone-{t}">'
+            f'<div class="ui-kpi-label">{html.escape(str(label))}</div>'
+            f'<div class="ui-kpi-value">{html.escape(str(value))}</div>{desc}</div>')
+
+
+def ui_kpi_grid(cards, columns=4):
+    n = columns if columns in (2, 3, 4) else 4
+    return _h(f'<div class="ui-kpi-grid cols-{n}">' + "".join(cards) + '</div>')
+
+
+def ui_channel(parameter, reading, level, bad=False):
+    css = "lverr" if bad else f"lv{min(max(int(level),0),3)}"
+    status = "INVALID" if bad else LEVELS[min(max(int(level),0),3)]["name"]
+    return (f'<div class="channel-card {css}"><div class="channel-name">'
+            f'{html.escape(str(parameter))}</div>'
+            f'<div class="channel-status">{html.escape(str(status))}</div>'
+            f'<div class="channel-reading">{html.escape(str(reading))}</div></div>')
+
 def html_table(rows, columns, chip_column=None):
     head = "".join(f"<th>{html.escape(c)}</th>" for c in columns)
     body = []
@@ -3092,7 +3276,8 @@ mode_label = "CO-SIMULATION (FUZZY-PID AKTIF)" if co_active else (
     "CO-SIMULATION NONAKTIF" if params.get("control_mode")=="Co-Simulation Fuzzy-PID"
     else "REPLAY + SHADOW")
 
-# Header status kecil: tidak menumpuk dengan gauge.
+# VISUAL SAJA: status EWS berwarna penuh seperti SCADA lama.
+# Nilai level/status tetap berasal dari mesin evaluasi yang sama.
 status_level = "lverr" if snap["stale"] or bad_sensors else f"lv{level}"
 status_text = ("DATA TIDAK VALID" if bad_sensors else
                "DATA TERLAMBAT" if snap["stale"] else LEVELS[level]["name"])
@@ -3100,13 +3285,15 @@ status_explain = ("Parameter perlu diperiksa" if bad_sensors else
                   "Aliran playback terhenti di luar jeda" if snap["stale"] else
                   "Status berdasarkan data playback, bukan keluaran Fuzzy-PID")
 mode_tag = mode_label
+status_depth = (f'{float(latest["Depth_m"]):,.2f} m TMD' if has_depth else 'Indeks playback')
 st.markdown(
-    _h(f'<div class="status-compact {status_level}">'
-       f'<div><span class="decision-label">STATUS EWS</span><br><b>{status_text}</b> '
-       f'<span class="meta">{html.escape(status_explain)}</span></div>'
-       f'<div class="meta">{mode_tag} &nbsp;•&nbsp; Sampel {index+1:,}/{n:,}'
-       + (f' &nbsp;•&nbsp; {float(latest["Depth_m"]):,.2f} m' if has_depth else '')
-       + '</div></div>'),
+    _h(f'<div class="status-hero {status_level}">'
+       f'<div><div class="status-kicker-new">STATUS EWS SIMULASI</div>'
+       f'<div class="status-main-new">{html.escape(status_text)}</div>'
+       f'<div class="status-explain-new">{html.escape(status_explain)}</div></div>'
+       f'<div class="status-side-new"><span class="status-mode-new">{html.escape(mode_tag)}</span><br>'
+       f'Sampel {index+1:,}/{n:,} &nbsp;·&nbsp; {html.escape(status_depth)}</div>'
+       '</div>'),
     unsafe_allow_html=True,
 )
 
@@ -3131,11 +3318,16 @@ if has_depth:
 
 # ---------------------------- DASHBOARD 1: KABIN DRILLER ----------------------------
 if view_cabin:
-    st.markdown("### Kabin Driller")
-    st.caption("Jarum/angka = data replay NEAC-001. Titik biru WOB = "
-               + ("target Fuzzy yang diterapkan pada model" if co_active else
-                  "rekomendasi SHADOW" if params.get("control_mode") == "Replay + SHADOW"
-                  else "tidak ditampilkan karena Auto-Pilot nonaktif") + ".")
+    st.markdown(ui_section("Kabin Driller", "Pemantauan parameter utama dan keputusan WOB adaptif", "green"),
+                unsafe_allow_html=True)
+    st.markdown(_h('<div class="ui-legend">'
+                '<span><i class="spot" style="background:var(--text)"></i>Jarum / angka: data rig</span>'
+                '<span><i class="spot" style="background:var(--accent)"></i>Titik biru WOB: '
+                + ("setpoint diterapkan" if co_active else
+                   "rekomendasi SHADOW" if params.get("control_mode") == "Replay + SHADOW"
+                   else "tidak aktif") + '</span>'
+                '<span><i class="spot" style="background:var(--lv1)"></i>Respons model di Kontrol Adaptif</span>'
+                '</div>'), unsafe_allow_html=True)
 
     # Empat kartu ringkas, bukan lima kartu data ditambah sepuluh lampu.
     if has_depth:
@@ -3167,14 +3359,18 @@ if view_cabin:
         ))
     st.markdown(_h('<div class="cabin-gauges">' + ''.join(gauges) + '</div>'),
                 unsafe_allow_html=True)
-    support = st.columns(2)
-    for col, parameter in zip(support, ("Torque", "StandpipePressure")):
+    # Hanya presentasi: Torque dan SPP memakai kartu berwarna, status EWS tetap sama.
+    support_cards = []
+    for parameter in ("Torque", "StandpipePressure"):
         name = "TORQUE" if parameter == "Torque" else "SPP"
-        col.metric(name, f"{float(latest[parameter]):,.2f} {UNITS[parameter]}"
-                   if parameter not in bad_sensors else "DATA TIDAK VALID")
+        invalid = parameter in bad_sensors
         lv = signal_levels.get(parameter, 0)
-        col.caption("Status: " + ("DATA TIDAK VALID" if parameter in bad_sensors
-                                 else LEVELS[lv]["name"]))
+        tone = "neutral" if invalid else ("green", "amber", "red", "magenta")[min(max(lv, 0), 3)]
+        val = (f"{float(latest[parameter]):,.2f} {UNITS[parameter]}"
+               if not invalid else "DATA TIDAK VALID")
+        desc = "DATA TIDAK VALID" if invalid else "EWS " + LEVELS[lv]["name"]
+        support_cards.append(ui_kpi(name, val, tone, desc))
+    st.markdown(ui_kpi_grid(support_cards, 2), unsafe_allow_html=True)
 
     action_display = "NAIKKAN" if shadow_action == "NAIKKAN" else (
         "TURUNKAN" if shadow_action.startswith("TURUNKAN") else "TAHAN"
@@ -3183,7 +3379,7 @@ if view_cabin:
     delta = shadow_target - ref_wob
     # Tampilkan alasan terstruktur satu kali; hindari tiga paragraf duplikat.
     st.markdown(_h(f'''
-    <div class="decision-panel">
+    <div class="decision-panel action-{'up' if action_display == 'NAIKKAN' else 'down' if action_display == 'TURUNKAN' else 'hold'}">
       <div class="decision-label">Keputusan Fuzzy Supervisor | {"DIPAKAI Fuzzy-PID" if co_active else "SHADOW"}</div>
       <div class="decision-grid">
         <div><div class="decision-label">{"Setpoint dipakai" if co_active else "Rekomendasi WOB"}</div><div class="decision-value">{shadow_target:.2f} kN</div></div>
@@ -3199,10 +3395,14 @@ if view_cabin:
                 "Rekomendasi masih SHADOW; tidak diterapkan pada pengendali."))
     if co_active:
         simh=ap_view["hist"]
-        cc=st.columns(3)
-        cc[0].metric("WOB respons model",f"{simh['ap_WOB'][-1]:.2f} kN")
-        cc[1].metric("ROP model (hipotetis)",f"{simh['ap_ROP'][-1]:.2f} m/h")
-        cc[2].metric("Risiko model (indikatif)",LEVELS[int(simh['model_ews_level'][-1])]["name"])
+        risk_level = int(simh["model_ews_level"][-1])
+        risk_tone = ("green", "amber", "red", "magenta")[min(max(risk_level, 0), 3)]
+        st.markdown(ui_kpi_grid([
+            ui_kpi("WOB respons model", f"{simh['ap_WOB'][-1]:.2f} kN", "amber", "Keluaran Fuzzy-PID"),
+            ui_kpi("ROP model (hipotetis)", f"{simh['ap_ROP'][-1]:.2f} m/h", "blue", "Plant simulasi"),
+            ui_kpi("Risiko model (indikatif)", LEVELS[risk_level]["name"], risk_tone,
+                   "Berbeda dari EWS data rig"),
+        ], 3), unsafe_allow_html=True)
 
     controls = st.columns([1, 1, 1])
     call_wide(controls[0].button,
@@ -3229,16 +3429,24 @@ if view_cabin:
 
 # ------------------------- DASHBOARD 2: KONTROL -------------------------
 elif view_control:
-    st.markdown("### Kontrol Adaptif (Fuzzy-PID)")
-    st.caption("Co-Simulation: Supervisor membaca feedback model sebelumnya → "
-               "setpoint → Fuzzy-PID → respons plant. SHADOW: hanya rekomendasi.")
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("WOB target " + ("DITERAPKAN" if co_active else "SHADOW"), f"{shadow_target:.2f} kN")
-    c2.metric("WOB mentah", f"{float(latest['WOB']):.2f} kN")
-    c3.metric("Keputusan Fuzzy", shadow_action)
-    c4.metric("Fuzzy-PID", "CLOSED-LOOP" if co_active else
-              "PROYEKSI" if ap_on and ap_view else "NONAKTIF")
-    st.info(shadow_reason)
+    st.markdown(ui_section("Kontrol Adaptif (Fuzzy-PID)",
+                           "Target, respons model, dan alasan keputusan supervisor", "blue"),
+                unsafe_allow_html=True)
+    # Perubahan visual saja: keempat metric memakai kartu kontras yang tidak memotong label.
+    direction_tone = ("green" if shadow_action == "NAIKKAN" else
+                      "red" if shadow_action.startswith("TURUNKAN") else "blue")
+    st.markdown(ui_kpi_grid([
+        ui_kpi("WOB target " + ("DITERAPKAN" if co_active else "SHADOW"),
+               f"{shadow_target:.2f} kN", "blue", "Setpoint supervisor"),
+        ui_kpi("WOB data rig", f"{float(latest['WOB']):.2f} kN", "neutral", "Playback asli"),
+        ui_kpi("Keputusan Fuzzy", shadow_action, direction_tone, "Arah koreksi target"),
+        ui_kpi("Status Fuzzy-PID", "CLOSED-LOOP" if co_active else
+               "PROYEKSI" if ap_on and ap_view else "NONAKTIF",
+               "green" if co_active else "amber" if ap_on and ap_view else "neutral",
+               "Mode pengujian model"),
+    ]), unsafe_allow_html=True)
+    st.markdown(_h('<div class="ui-reason"><b>ALASAN KEPUTUSAN · </b>'
+                   + html.escape(str(shadow_reason)) + '</div>'), unsafe_allow_html=True)
     st.caption("Aturan Fuzzy: " + str(shadow_current.get("Aksi_Aturan_Fuzzy", "TAHAN"))
                + "; arah target: " + shadow_action + ". "
                + ("Pada Co-Simulation, hanya keputusan Fuzzy dan pembatas risiko yang mengubah target."
@@ -3313,18 +3521,19 @@ Keluaran merupakan **rekomendasi uji**, bukan estimasi kekerasan batuan atau set
 
 # ---------------------- DASHBOARD 3: EWS + EVALUASI ----------------------
 else:
-    st.markdown("### EWS & Evaluasi")
-    st.caption("Status keselamatan SIMULASI dan hasil penelitian dalam satu halaman; "
-               "monitoring alarm terpisah dari metrik hasil model.")
+    st.markdown(ui_section("EWS & Evaluasi", "Status kanal, riwayat alarm, dan hasil uji simulator", "red"),
+                unsafe_allow_html=True)
     tabs=st.tabs(["Monitoring EWS", "Hasil Penelitian"])
     with tabs[0]:
         st.markdown("**Status kanal pemantauan**")
-        cols=st.columns(5)
-        for i,p in enumerate(PARAMETERS):
-            lv=signal_levels.get(p,0)
-            cols[i].metric(SHORT_NAME[p],
-                           "INVALID" if p in bad_sensors else LEVELS[lv]["name"])
-            cols[i].caption(f"{_num(latest[p],DECIMALS[p])} {UNITS[p]}")
+        channel_cards = []
+        for p in PARAMETERS:
+            lv = signal_levels.get(p, 0)
+            channel_cards.append(ui_channel(
+                SHORT_NAME[p], f"{_num(latest[p], DECIMALS[p])} {UNITS[p]}",
+                lv, p in bad_sensors))
+        st.markdown(_h('<div class="channel-grid">' + ''.join(channel_cards) + '</div>'),
+                    unsafe_allow_html=True)
         if has_depth:
             st.caption("EWS absolut menggunakan ambang demonstrasi. Alarm laju perubahan per MENIT "
                        "dinonaktifkan karena timestamp NEAC-001 bukan waktu akuisisi.")
@@ -3365,10 +3574,11 @@ else:
     with tabs[1]:
         st.markdown("**Hasil perhitungan Fuzzy " + ("Co-Simulation" if co_active else "SHADOW") + "**")
         directions = shadow_hist["Keputusan_Fuzzy"].value_counts()
-        a,b,c = st.columns(3)
-        a.metric("Setpoint naik", int(directions.get("NAIKKAN",0)))
-        b.metric("Setpoint tahan", int(directions.get("TAHAN",0)))
-        c.metric("Setpoint turun", int(directions.get("TURUNKAN",0)))
+        st.markdown(ui_kpi_grid([
+            ui_kpi("Setpoint naik", int(directions.get("NAIKKAN", 0)), "green", "Keputusan simulasi"),
+            ui_kpi("Setpoint tahan", int(directions.get("TAHAN", 0)), "blue", "Keputusan simulasi"),
+            ui_kpi("Setpoint turun", int(directions.get("TURUNKAN", 0)), "red", "Keputusan simulasi"),
+        ], 3), unsafe_allow_html=True)
         st.caption("Keputusan per sampel simulasi, BUKAN tindakan rig atau NPT aktual.")
         if co_active:
             st.markdown("**Perbandingan pada plant HIPOTETIS yang sama**")
