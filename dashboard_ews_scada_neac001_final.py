@@ -1,3 +1,10 @@
+# PDSI | Adaptive Drilling Simulator — FUZZY CO-SIMULATION (OFFLINE)
+# HMI 3 dashboard · SHADOW vs CO-SIMULATION · Python/Streamlit
+# Modifikasi dari versi HMI 3 dashboard yang digunakan sebelumnya.
+# PENTING: plant sensitivitas WOB/RPM masih hipotetis, bukan Bingham,
+# bukan kalibrasi performa rig dan tidak terhubung ke Amphion atau rig.
+# Hasil simulasi, EWS replay dan data asli dibedakan.
+
 import copy
 import hashlib
 import hmac
@@ -212,7 +219,8 @@ DEFAULT_PARAMS = {
     "wa_enabled": False,
     "wa_min_level": 2,
     # auto pilot Fuzzy-PID
-    "autopilot": False,
+    "autopilot": True,
+    "control_mode": "Co-Simulation Fuzzy-PID",
     "ap_wob_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_wob_sp"],
     "ap_rpm_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rpm_sp"],
     "ap_rop_target": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rop_target"],
@@ -240,12 +248,13 @@ PARAM_LABELS = {
     "wa_enabled": "Notifikasi WhatsApp",
     "wa_min_level": "Level minimum WhatsApp",
     "autopilot": "Mode auto pilot (Fuzzy-PID)",
+    "control_mode": "Mode pengujian fuzzy",
     "ap_wob_sp": "Auto pilot: setpoint WOB (kN)",
     "ap_rpm_sp": "Auto pilot: setpoint RPM",
     "ap_rop_target": "Auto pilot: target ROP (m/h)",
     "ap_rise_med_pct": "Auto pilot: kenaikan sedang (%)",
     "ap_rise_high_pct": "Auto pilot: kenaikan tinggi (%)",
-    "shadow_wob_ceiling_kn": "Batas rekomendasi WOB SHADOW (kN)",
+    "shadow_wob_ceiling_kn": "Batas WOB simulator (kN)",
     "shadow_ramp_pct": "Batas perubahan target per sampel (%)",
 }
 
@@ -290,7 +299,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v8-three-dashboard-shadow"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v9-three-dashboard-fuzzy-cosim"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -546,6 +555,7 @@ def fresh_state():
         "alarm": None,
         "wa_last": {},
         "ap": None,      # keadaan pengendali auto pilot
+        "cosim": None,   # keadaan model loop tertutup fuzzy, terpisah dari data replay
         "n": 1,          # jumlah baris sumber data saat ini
     }
 
@@ -1570,7 +1580,10 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         if steps == 0:
             evaluate(source, params, state, False, wa_cfg)
 
-        ap_sync(source, params, state)
+        if params.get("control_mode") == "Co-Simulation Fuzzy-PID":
+            cosim_sync(source, params, state)
+        else:
+            ap_sync(source, params, state)
 
         effective_stale = max(float(params["stale_after"]), 2.0 * interval + 1.0)
         age = now - state["last_data_time"]
@@ -1584,7 +1597,10 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
 
         alarm = dict(state["alarm"]) if state["alarm"] else None
         ack = dict(state["ack"]) if state["ack"] else None
-        ap_state = state["ap"]
+        ap_state = (state.get("cosim") if (params.get("control_mode") == "Co-Simulation Fuzzy-PID"
+                    and params.get("autopilot",False)) else
+                    None if params.get("control_mode") == "Co-Simulation Fuzzy-PID"
+                    else state["ap"])
         ap_snapshot = None
         if ap_state and ap_state["hist"]["t"]:
             ap_snapshot = {
@@ -1602,6 +1618,8 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         snapshot = {
             "ap": ap_snapshot,
             "ap_on": bool(params["autopilot"]),
+            "co_active": bool(params.get("control_mode") == "Co-Simulation Fuzzy-PID"
+                              and params["autopilot"] and ap_snapshot is not None),
             "index": max(0, min(state["index"], n - 1)),
             "events": list(state["events"]),
             "params": copy.deepcopy(params),
@@ -1785,6 +1803,230 @@ def fuzzy_snapshot(source,params,index,ews_level=0,fault=False):
 
 
 
+
+# ==========================================================
+# CO-SIMULATION FUZZY-PID (PENELITIAN/OFFLINE)
+# Supervisor membaca feedback model sampai sampel SEBELUMNYA.
+# Fuzzy-PID lama (fpid_step) melacak setpoint WOB dan RPM.
+# Plant empiris adalah PROXY sensitivitas terhadap WOB/RPM, bukan Bingham,
+# bukan model rig tervalidasi dan BUKAN perintah ke rig PDSI.
+# ==========================================================
+COSIM_WINDOW = 12
+COSIM_WOB_EXP = 0.60  # hipotesis sensitivitas, perlu validasi empiris
+COSIM_RPM_EXP = 0.45
+COSIM_TORQUE_WOB_EXP = 0.30
+COSIM_TORQUE_RPM_EXP = 0.30
+
+
+def cosim_new(row, params):
+    def valid_initial(key, fallback):
+        v = float(row.get(key, float("nan")))
+        return v if np.isfinite(v) and v > 0 else float(fallback)
+    raw_wob = valid_initial("WOB", params["ap_wob_sp"])
+    raw_rpm = valid_initial("RPM", params["ap_rpm_sp"])
+    raw_rop = valid_initial("ROP", params["ap_rop_target"])
+    raw_torque = valid_initial("Torque", 0.01)
+    raw_spp = valid_initial("StandpipePressure", 1000.0)
+    ap = {
+        "ch": {p: new_channel(v) for p,v in {
+            "WOB":raw_wob,"RPM":raw_rpm,"ROP":raw_rop,
+            "Torque":raw_torque,"StandpipePressure":raw_spp}.items()},
+        "fixed_ch": {"WOB":new_channel(raw_wob)},
+        "prev_target": float(params["ap_wob_sp"]),
+        "safe_raw": {"WOB":raw_wob,"RPM":raw_rpm,"ROP":raw_rop,
+                     "Torque":raw_torque,"StandpipePressure":raw_spp},
+        "hist": {key:[] for key in (
+            "t","idx","depth","wob_cmd","rpm_cmd","raw_WOB","raw_ROP",
+            "raw_RPM","raw_Torque","raw_StandpipePressure","ap_WOB","ap_ROP",
+            "ap_RPM","ap_Torque","ap_StandpipePressure","WOB_fixed","ROP_fixed",
+            "Torque_fixed","Fuzzy_action","Fuzzy_rule","Fuzzy_reason",
+            "Fuzzy_delta_pct","Eff_ratio","Torque_ratio","SPP_ratio",
+            "WOB_ratio","RPM_ratio","Risk_score","Confidence",
+            "model_ews_level","WOB_sebelumnya","WOB_acuan_kN",
+            "kp_wob","ki_wob","kd_wob")},
+        "brake":0., "boost":0., "rise_t":0., "rise_p":0.,
+        "nom":{"Torque":raw_torque,"StandpipePressure":raw_spp},
+        "last_index":None, "active":True,
+        "scenario":params["scenario"], "uid":int(time.time()*1000),
+    }
+    return ap
+
+
+def cosim_feedback_ratios(hist, window=COSIM_WINDOW):
+    """Jendela hanya dari keluaran plant pada sampel yang TELAH diproses."""
+    n=len(hist["ap_ROP"])
+    if n < 2*window:
+        return [float("nan")]*5
+    def median_ratio(values):
+        arr=np.asarray(values[-2*window:],dtype=float)
+        if not np.isfinite(arr).all() or (arr<=0).any(): return float("nan")
+        before=float(np.median(arr[:window])); after=float(np.median(arr[window:]))
+        return after/before if before>1e-9 else float("nan")
+    eff=[]; torque_wob=[]
+    for rop,wob,rpm,tor in zip(hist["ap_ROP"][-2*window:],
+                               hist["ap_WOB"][-2*window:],
+                               hist["ap_RPM"][-2*window:],
+                               hist["ap_Torque"][-2*window:]):
+        if min(rop,wob,rpm,tor)<=0:
+            return [float("nan")]*5
+        eff.append(rop/(wob**0.6*rpm**0.5))
+        torque_wob.append(tor/wob)
+    return [median_ratio(v) for v in
+            (eff,torque_wob,hist["ap_StandpipePressure"],
+             hist["ap_WOB"],hist["ap_RPM"])]
+
+
+def cosim_step(ap, row, params, index, timestamp):
+    """Satu langkah loop: feedback lama -> fuzzy -> WOB target -> PID -> plant.
+
+    Playback di sampel sekarang hanya sumber gangguan/acuan. Data masa depan
+    tidak digunakan. Konstanta plant adalah asumsi demonstrasi.
+    """
+    h=ap["hist"]
+    previous=float(ap["prev_target"])
+    ceiling=float(params.get("shadow_wob_ceiling_kn",100.0))
+    ramp=float(params.get("shadow_ramp_pct",2.0))/100.
+    base=float(params["ap_wob_sp"])
+    floor=max(0.5,min(ceiling,0.55*base))
+    allowed=max(0.05,base*ramp)
+    vals=cosim_feedback_ratios(h)
+    decision=fuzzy_supervisor_rule(*vals)
+    valid=True; observed={}
+    for p, lo, hi in (("ROP",0.001,500.),("WOB",0.001,500.),
+                      ("RPM",0.001,300.),("Torque",0.001,100.),
+                      ("StandpipePressure",0.001,15000.)):
+        v=float(row.get(p,float("nan")))
+        if not np.isfinite(v) or not (lo<=v<=hi):
+            valid=False; v=ap["safe_raw"][p]
+        observed[p]=v
+    if valid:
+        ap["safe_raw"]=dict(observed)
+    # Hanya keluaran dengan aksi Fuzzy jelas yang mengubah setpoint.
+    proposed=previous
+    rule_action=decision["action"]
+    reason=decision["reason"]
+    if not valid:
+        rule_action="TAHAN"
+        reason="Data tidak valid: gunakan sampel terakhir yang valid; target ditahan"
+    elif rule_action in ("NAIKKAN","TURUNKAN"):
+        proposed=previous*(1.+decision["delta_pct"]/100.)
+    # Batas berbasis nilai mentah yang kini dibaca: indikasi bahaya menahan
+    # kenaikan WOB pada model; tidak mengubah/menimpa mesin ACK replay.
+    raw_risk=max(level_for(observed[p],params["thresholds"][p])
+                 for p in ("Torque","StandpipePressure","WOB"))
+    if valid and raw_risk>=2:
+        proposed=min(proposed,previous-allowed)
+        reason+="; pembatas EWS replay MERAH/MAGENTA (torsi/SPP/WOB)"
+    elif valid and raw_risk==1 and proposed>previous:
+        proposed=previous
+        reason+="; EWS KUNING: kenaikan WOB ditahan"
+    if not valid: proposed=previous
+    target=float(np.clip(proposed,previous-allowed,previous+allowed))
+    target=float(np.clip(target,floor,ceiling))
+    movement=("NAIKKAN" if target>previous+0.01 else
+              "TURUNKAN" if target<previous-0.01 else "TAHAN")
+    ap["prev_target"]=target
+
+    # Kedua kontroler memakai fungsi Fuzzy-PID persis sama dan keadaan awal sama.
+    wob_y=fpid_step(ap["ch"]["WOB"],"WOB",target,base)
+    wob_fixed=fpid_step(ap["fixed_ch"]["WOB"],"WOB",base,base)
+    rpm_y=fpid_step(ap["ch"]["RPM"],"RPM",float(params["ap_rpm_sp"]),
+                    float(params["ap_rpm_sp"]))
+    # Respons counterfactual: gangguan dasar adalah nilai replay saat ini.
+    # Nilai plant TIDAK masuk kembali ke data NEAC-001 yang tersimpan.
+    wr=float(np.clip(wob_y/max(observed["WOB"],0.01),0.5,1.5))
+    wf=float(np.clip(wob_fixed/max(observed["WOB"],0.01),0.5,1.5))
+    rr=float(np.clip(rpm_y/max(observed["RPM"],0.01),0.5,1.5))
+    rop_y=float(np.clip(observed["ROP"]*wr**COSIM_WOB_EXP*rr**COSIM_RPM_EXP,0.,500.))
+    rop_fixed=float(np.clip(observed["ROP"]*wf**COSIM_WOB_EXP*rr**COSIM_RPM_EXP,0.,500.))
+    torque_y=float(observed["Torque"]*wr**COSIM_TORQUE_WOB_EXP*rr**COSIM_TORQUE_RPM_EXP)
+    torque_fixed=float(observed["Torque"]*wf**COSIM_TORQUE_WOB_EXP*rr**COSIM_TORQUE_RPM_EXP)
+    # SPP sebagai gangguan/eksogen: dataset tidak memberi model hidraulik.
+    spp_y=float(observed["StandpipePressure"])
+    model_lv=max(level_for(torque_y,params["thresholds"]["Torque"]),
+                 level_for(spp_y,params["thresholds"]["StandpipePressure"]),
+                 level_for(wob_y,params["thresholds"]["WOB"]))
+    ap["ch"]["ROP"]["y"]=rop_y
+    ap["ch"]["Torque"]["y"]=torque_y
+    ap["ch"]["StandpipePressure"]["y"]=spp_y
+    depth=float(row.get("Depth_m",float("nan")))
+    data={"t":timestamp,"idx":int(index),"depth":depth,"wob_cmd":target,
+          "rpm_cmd":float(params["ap_rpm_sp"]),"raw_WOB":float(row["WOB"]),
+          "raw_ROP":float(row["ROP"]),"raw_RPM":float(row["RPM"]),
+          "raw_Torque":float(row["Torque"]),
+          "raw_StandpipePressure":float(row["StandpipePressure"]),
+          "ap_WOB":wob_y,"ap_ROP":rop_y,"ap_RPM":rpm_y,
+          "ap_Torque":torque_y,"ap_StandpipePressure":spp_y,
+          "WOB_fixed":wob_fixed,"ROP_fixed":rop_fixed,
+          "Torque_fixed":torque_fixed,"Fuzzy_action":movement,
+          "Fuzzy_rule":rule_action,"Fuzzy_reason":reason,
+          "Fuzzy_delta_pct":decision["delta_pct"],
+          "Eff_ratio":vals[0],"Torque_ratio":vals[1],
+          "SPP_ratio":vals[2],"WOB_ratio":vals[3],"RPM_ratio":vals[4],
+          "Risk_score":decision["risk"],"Confidence":decision["confidence"],
+          "model_ews_level":model_lv,"WOB_sebelumnya":previous,
+          "WOB_acuan_kN":previous,"kp_wob":ap["ch"]["WOB"]["kp"],
+          "ki_wob":ap["ch"]["WOB"]["ki"],"kd_wob":ap["ch"]["WOB"]["kd"]}
+    for k in h: h[k].append(data[k])
+    ap["last_index"]=index
+
+
+def cosim_sync(source,params,state):
+    """Sinkronkan loop berdasarkan indeks playback bersama; tidak pada refresh UI."""
+    if not params.get("autopilot",False):
+        if state.get("cosim") is not None:state["cosim"]["active"]=False
+        return
+    index=int(np.clip(state["index"],0,len(source)-1))
+    ap=state.get("cosim")
+    restart=(ap is None or not ap.get("active") or
+             ap.get("scenario")!=params["scenario"] or
+             ap.get("last_index") is None or index<ap["last_index"])
+    if restart:
+        ap=state["cosim"]=cosim_new(source.iloc[0],params)
+        begin=0
+    else:
+        begin=ap["last_index"]+1
+    for i in range(begin,index+1):
+        cosim_step(ap,source.iloc[i],params,i,source["timestamp"].iloc[i])
+
+
+def cosim_summary(hist,params):
+    """Perbandingan SIMULASI pada plant hipotetis yang sama, bukan NPT aktual."""
+    if not hist or not hist.get("ap_WOB"):return pd.DataFrame()
+    def vals(k):return np.asarray(hist[k],dtype=float)
+    adaptive_rop=vals("ap_ROP"); fixed_rop=vals("ROP_fixed")
+    adaptive_wob=vals("ap_WOB");fixed_wob=vals("WOB_fixed")
+    adaptive_target=vals("wob_cmd")
+    base=float(params["ap_wob_sp"])
+    return pd.DataFrame([
+        {"Indikator":"ROP rata-rata model (m/h)","Setpoint tetap":round(float(np.nanmean(fixed_rop)),3),"Setpoint adaptif":round(float(np.nanmean(adaptive_rop)),3)},
+        {"Indikator":"WOB rata-rata model (kN)","Setpoint tetap":round(float(np.nanmean(fixed_wob)),3),"Setpoint adaptif":round(float(np.nanmean(adaptive_wob)),3)},
+        {"Indikator":"Error tracking WOB (MAE, kN)","Setpoint tetap":round(float(np.nanmean(abs(fixed_wob-base))),3),"Setpoint adaptif":round(float(np.nanmean(abs(adaptive_wob-adaptive_target))),3)},
+        {"Indikator":"Torsi puncak model (kN.m)","Setpoint tetap":round(float(np.nanmax(vals("Torque_fixed"))),3),"Setpoint adaptif":round(float(np.nanmax(vals("ap_Torque"))),3)},
+    ])
+
+
+def cosim_fuzzy_frame(hist):
+    """Pemetaan hasil simulator agar seluruh dashboard memakai satu target."""
+    if not hist or not hist.get("wob_cmd"):return pd.DataFrame()
+    n=len(hist["wob_cmd"])
+    return pd.DataFrame({
+        "Baris":np.asarray(hist["idx"])+1,"Depth_m":hist["depth"],
+        "WOB_mentah_kN":hist["raw_WOB"],
+        "WOB_acuan_kN":hist["WOB_acuan_kN"],
+        "WOB_shadow_kN":hist["wob_cmd"],
+        "Keputusan_Fuzzy":hist["Fuzzy_action"],
+        "Aksi_Aturan_Fuzzy":hist["Fuzzy_rule"],
+        "Alasan_Fuzzy":hist["Fuzzy_reason"],
+        "Rasio_ROP_norm":hist["Eff_ratio"],
+        "Rasio_Torque_per_WOB":hist["Torque_ratio"],
+        "Rasio_SPP":hist["SPP_ratio"],
+        "Rasio_WOB":hist["WOB_ratio"],"Rasio_RPM":hist["RPM_ratio"],
+        "Skor_risiko":hist["Risk_score"],
+        "Kepercayaan":hist["Confidence"],
+        "WOB_model_kN":hist["ap_WOB"],"ROP_model_m_per_h":hist["ap_ROP"]})
+
+
 # ==========================================================
 # CALLBACK WIDGET (dipanggil saat pengguna mengubah sesuatu)
 # ==========================================================
@@ -1821,6 +2063,8 @@ def apply_scenario_preset():
     with shared["lock"]:
         _apply_preset(shared["params"], shared["params"]["scenario"])
         _invalidate_levels()
+        shared["state"]["cosim"] = None
+        shared["state"]["ap"] = None
         _touch()
         audit_log(session_user(), "PRESET SKENARIO", f"diterapkan ulang: {shared['params']['scenario']}")
 
@@ -1867,6 +2111,9 @@ def update_param(name, key):
             session_user(), "UBAH PARAMETER",
             f"{PARAM_LABELS.get(name, name)}: dari {old} menjadi {new}",
         )
+        if name in ("control_mode", "autopilot", "ap_wob_sp", "ap_rpm_sp",
+                    "shadow_wob_ceiling_kn", "shadow_ramp_pct"):
+            shared["state"]["cosim"] = None
         if name == "scenario":
             # Ganti skenario = mulai ulang simulasi dengan ambang/setpoint skenario itu.
             _apply_preset(shared["params"], new)
@@ -1938,6 +2185,8 @@ def reset_params_to_default():
     with shared["lock"]:
         shared["params"] = copy.deepcopy(DEFAULT_PARAMS)
         _invalidate_levels()
+        shared["state"]["ap"] = None
+        shared["state"]["cosim"] = None
         _touch()
         audit_log(session_user(), "RESET PARAMETER", "semua parameter dikembalikan ke default")
 
@@ -2400,7 +2649,7 @@ def kpi_rows_from_hist(hist):
 
 
 @st.cache_data(show_spinner=False, max_entries=30)
-def render_comparison_png(cache_key, theme, ylabel, xlabel, _x, _raw, _shadow, _model):
+def render_comparison_png(cache_key, theme, ylabel, xlabel, _x, _raw, _shadow, _model, mode="SHADOW"):
     pal = PALETTES.get(theme, PALETTES["light"])
     fig = Figure(figsize=(10.2, 3.2), dpi=120, facecolor=pal["surface"])
     ax = fig.add_subplot(111)
@@ -2413,10 +2662,13 @@ def render_comparison_png(cache_key, theme, ylabel, xlabel, _x, _raw, _shadow, _
         ax.plot(x, raw, color=pal["muted"], linewidth=1.6, label="Data rig historis")
     if len(x) and np.isfinite(shadow).any():
         ax.plot(x, shadow, color=pal["accent"], linewidth=2.0,
-                label="Rekomendasi Fuzzy SHADOW")
+                label=("Setpoint WOB diterapkan" if "WOB" in ylabel else "ROP baseline tetap")
+                if mode=="COSIM" else "Rekomendasi Fuzzy SHADOW")
     if len(x) and np.isfinite(model).any():
         ax.plot(x, model, color=pal["lv1"], linewidth=1.8, linestyle="--",
-                label="Proyeksi Fuzzy-PID lama (terpisah)")
+                label=("WOB respons model Fuzzy-PID" if "WOB" in ylabel
+                       else "ROP plant adaptif") if mode=="COSIM" else
+                       "Proyeksi Fuzzy-PID lama (terpisah)")
     ax.set_ylabel(ylabel, color=pal["text"], fontsize=9)
     ax.set_xlabel(xlabel, color=pal["text"], fontsize=9)
     ax.grid(axis="y", color=pal["chart_grid"], alpha=.6)
@@ -2458,14 +2710,15 @@ st.markdown(_h(f"""
     <div class="ews-sub">Data NEAC-001 | Fuzzy Supervisor | EWS</div>
   </div>
   <div>
-    <span class="tag sim">Replay + Shadow</span>
+    <span class="tag sim">Co-Simulation / Replay</span>
     <span class="tag">{"Admin" if is_admin else "Viewer"}</span>
   </div>
 </div>"""), unsafe_allow_html=True)
 st.markdown(
     notice(
-        "<b>Replay offline dan rekomendasi SHADOW.</b> Tidak terhubung ke rig/Amphion. "
-        "Ambang adalah indikator demonstrasi, bukan batas operasi nyata.",
+        "<b>Prototipe simulasi Fuzzy-PID.</b> Mode Co-Simulation menggunakan plant "
+        "sensitivitas hipotetis, bukan hasil validasi rig/Amphion. "
+        "Data asli tidak diubah; ambang EWS adalah demonstrasi.",
         "warn",
     ),
     unsafe_allow_html=True,
@@ -2535,6 +2788,7 @@ st.session_state["w_test_sensor"] = current["test_faulty_sensor"]
 st.session_state["w_wa_enabled"] = current["wa_enabled"]
 st.session_state["w_wa_min_level"] = current["wa_min_level"]
 st.session_state["w_autopilot"] = current["autopilot"]
+st.session_state["w_control_mode"] = current.get("control_mode", "Co-Simulation Fuzzy-PID")
 st.session_state["w_ap_wob"] = float(current["ap_wob_sp"])
 st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
 st.session_state["w_ap_rop"] = float(current["ap_rop_target"])
@@ -2571,6 +2825,13 @@ with st.sidebar:
     st.selectbox(
         "Skenario", SCENARIOS, key="w_scenario", disabled=locked,
         on_change=update_param, args=("scenario", "w_scenario"),
+    )
+    st.selectbox(
+        "Mode penelitian", ["Co-Simulation Fuzzy-PID", "Replay + SHADOW"],
+        key="w_control_mode", disabled=locked,
+        on_change=update_param, args=("control_mode", "w_control_mode"),
+        help="Co-Simulation mengirim target Fuzzy ke Fuzzy-PID pada plant hipotetis. "
+             "SHADOW hanya mencatat rekomendasi terhadap replay.",
     )
     cols_play = st.columns(2)
     call_wide(cols_play[0].button,"Jeda" if current["auto"] else "Lanjut",on_click=toggle_play,disabled=locked,key="nav_play")
@@ -2648,9 +2909,10 @@ with st.sidebar:
             "Kenaikan sedang harus lebih kecil dari kenaikan tinggi",
         )
         st.divider()
-        st.caption("Supervisor SHADOW: rekomendasi telemetri, tidak mengendalikan Fuzzy-PID.")
+        st.caption("Batas uji berlaku untuk setpoint Fuzzy (SHADOW atau Co-Simulation); "
+                   "bukan batas operasional rig.")
         st.number_input(
-            "Batas atas WOB SHADOW (kN)", min_value=1.0, max_value=500.0,
+            "Batas WOB simulator (kN)", min_value=1.0, max_value=500.0,
             step=1.0, key="w_shadow_ceiling", disabled=locked,
             on_change=update_param, args=("shadow_wob_ceiling_kn", "w_shadow_ceiling"),
         )
@@ -2704,7 +2966,8 @@ with st.sidebar:
             disabled=locked, format_func=lambda x: f"{x} pembacaan terakhir",
             on_change=update_param, args=("roc_window", "w_roc_window"),
         )
-        st.caption("Ambang laju = perubahan per MENIT (naik atau turun).")
+        st.caption("Laju per menit hanya valid jika data memiliki timestamp akuisisi riil. "
+                   "Untuk NEAC-001 kedalaman, alarm laju dinonaktifkan secara otomatis.")
         for parameter in PARAMETERS:
             st.markdown(f"**{DISPLAY_NAME.get(parameter, parameter)}** ({UNITS[parameter]}/mnt)")
             cols = st.columns(2)
@@ -2811,15 +3074,23 @@ latest = visible.iloc[-1]
 has_depth = ("Depth_m" in simulation_data.columns
              and bool(np.isfinite(float(latest.get("Depth_m", np.nan)))))
 
-# FUZZY SUPERVISOR SHADOW BERBASIS TELEMETRI; data masa depan tidak dipakai.
-# Cache menghasilkan histori sehingga ketiga dashboard memakai satu sumber target.
-shadow_current, shadow_hist = fuzzy_snapshot(
-    simulation_data, params, index, ews_level=level,
-    fault=bool(snap["stale"] or bad_sensors or snap["fault_keys"]),
-)
+# Satu sumber target per mode. Pada Co-Simulation, titik biru BENAR-BENAR
+# menjadi masukan Fuzzy-PID yang sedang disimulasikan; bukan angka SHADOW.
+co_active = bool(snap.get("co_active", False))
+if co_active:
+    shadow_hist = cosim_fuzzy_frame(ap_view["hist"])
+    shadow_current = shadow_hist.iloc[-1].to_dict()
+else:
+    shadow_current, shadow_hist = fuzzy_snapshot(
+        simulation_data, params, index, ews_level=level,
+        fault=bool(snap["stale"] or bad_sensors or snap["fault_keys"]),
+    )
 shadow_target = float(shadow_current["WOB_shadow_kN"])
 shadow_action = str(shadow_current["Keputusan_Fuzzy"])
 shadow_reason = str(shadow_current["Alasan_Fuzzy"])
+mode_label = "CO-SIMULATION (FUZZY-PID AKTIF)" if co_active else (
+    "CO-SIMULATION NONAKTIF" if params.get("control_mode")=="Co-Simulation Fuzzy-PID"
+    else "REPLAY + SHADOW")
 
 # Header status kecil: tidak menumpuk dengan gauge.
 status_level = "lverr" if snap["stale"] or bad_sensors else f"lv{level}"
@@ -2828,7 +3099,7 @@ status_text = ("DATA TIDAK VALID" if bad_sensors else
 status_explain = ("Parameter perlu diperiksa" if bad_sensors else
                   "Aliran playback terhenti di luar jeda" if snap["stale"] else
                   "Status berdasarkan data playback, bukan keluaran Fuzzy-PID")
-mode_tag = "REPLAY + FUZZY SHADOW"
+mode_tag = mode_label
 st.markdown(
     _h(f'<div class="status-compact {status_level}">'
        f'<div><span class="decision-label">STATUS EWS</span><br><b>{status_text}</b> '
@@ -2861,8 +3132,10 @@ if has_depth:
 # ---------------------------- DASHBOARD 1: KABIN DRILLER ----------------------------
 if view_cabin:
     st.markdown("### Kabin Driller")
-    st.caption("Satu layar untuk pembacaan rig, target adaptif, dan alasan keputusan. "
-               "Jarum/angka = data asli; titik biru di WOB = rekomendasi SHADOW.")
+    st.caption("Jarum/angka = data replay NEAC-001. Titik biru WOB = "
+               + ("target Fuzzy yang diterapkan pada model" if co_active else
+                  "rekomendasi SHADOW" if params.get("control_mode") == "Replay + SHADOW"
+                  else "tidak ditampilkan karena Auto-Pilot nonaktif") + ".")
 
     # Empat kartu ringkas, bukan lima kartu data ditambah sepuluh lampu.
     if has_depth:
@@ -2889,7 +3162,8 @@ if view_cabin:
         gauges.append(gauge_html(
             p, None if invalid else float(latest[p]), THRESHOLDS[p],
             signal_levels.get(p, 0), invalid, rate_note,
-            ap_value=shadow_target if p == "WOB" else None,
+            ap_value=shadow_target if (p == "WOB" and
+                                     (co_active or params.get("control_mode") == "Replay + SHADOW")) else None,
         ))
     st.markdown(_h('<div class="cabin-gauges">' + ''.join(gauges) + '</div>'),
                 unsafe_allow_html=True)
@@ -2910,17 +3184,25 @@ if view_cabin:
     # Tampilkan alasan terstruktur satu kali; hindari tiga paragraf duplikat.
     st.markdown(_h(f'''
     <div class="decision-panel">
-      <div class="decision-label">Keputusan Fuzzy Supervisor | SHADOW</div>
+      <div class="decision-label">Keputusan Fuzzy Supervisor | {"DIPAKAI Fuzzy-PID" if co_active else "SHADOW"}</div>
       <div class="decision-grid">
-        <div><div class="decision-label">Rekomendasi WOB</div><div class="decision-value">{shadow_target:.2f} kN</div></div>
+        <div><div class="decision-label">{"Setpoint dipakai" if co_active else "Rekomendasi WOB"}</div><div class="decision-value">{shadow_target:.2f} kN</div></div>
         <div><div class="decision-label">Arah target</div><div class="decision-value">{html.escape(action_display)}</div></div>
-        <div><div class="decision-label">Dibanding median WOB lokal</div><div class="decision-value">{delta:+.2f} kN</div></div>
+        <div><div class="decision-label">{"Δ target per langkah" if co_active else "Δ dari acuan lokal"}</div><div class="decision-value">{delta:+.2f} kN</div></div>
       </div>
       <div class="decision-reason"><b>Alasan:</b> {html.escape(shadow_reason)}</div>
     </div>'''), unsafe_allow_html=True)
-    st.caption("Rekomendasi dihitung dari efisiensi ROP relatif, Torque/WOB, SPP, "
-               "dan kestabilan WOB/RPM. Tidak ada klasifikasi batuan lunak–keras. "
-               "Setpoint SHADOW belum mengubah data rig atau perintah Fuzzy-PID.")
+    st.caption("Logika adaptif memakai rasio efisiensi ROP, Torque/WOB, SPP, "
+               "dan kestabilan WOB/RPM. " +
+               ("Feedback berasal dari langkah MODEL sebelumnya; target WOB dikirim ke Fuzzy-PID "
+                "dan responsnya dipisahkan dari data rig asli." if co_active else
+                "Rekomendasi masih SHADOW; tidak diterapkan pada pengendali."))
+    if co_active:
+        simh=ap_view["hist"]
+        cc=st.columns(3)
+        cc[0].metric("WOB respons model",f"{simh['ap_WOB'][-1]:.2f} kN")
+        cc[1].metric("ROP model (hipotetis)",f"{simh['ap_ROP'][-1]:.2f} m/h")
+        cc[2].metric("Risiko model (indikatif)",LEVELS[int(simh['model_ews_level'][-1])]["name"])
 
     controls = st.columns([1, 1, 1])
     call_wide(controls[0].button,
@@ -2948,20 +3230,23 @@ if view_cabin:
 # ------------------------- DASHBOARD 2: KONTROL -------------------------
 elif view_control:
     st.markdown("### Kontrol Adaptif (Fuzzy-PID)")
-    st.caption("Fuzzy Supervisor menentukan rekomendasi WOB; Fuzzy-PID lama masih "
-               "menghitung proyeksi secara terpisah. Belum closed-loop dengan target SHADOW.")
+    st.caption("Co-Simulation: Supervisor membaca feedback model sebelumnya → "
+               "setpoint → Fuzzy-PID → respons plant. SHADOW: hanya rekomendasi.")
     c1,c2,c3,c4 = st.columns(4)
-    c1.metric("WOB target SHADOW", f"{shadow_target:.2f} kN")
+    c1.metric("WOB target " + ("DITERAPKAN" if co_active else "SHADOW"), f"{shadow_target:.2f} kN")
     c2.metric("WOB mentah", f"{float(latest['WOB']):.2f} kN")
     c3.metric("Keputusan Fuzzy", shadow_action)
-    c4.metric("Status proyeksi", "AKTIF" if ap_on and ap_view else "NONAKTIF")
+    c4.metric("Fuzzy-PID", "CLOSED-LOOP" if co_active else
+              "PROYEKSI" if ap_on and ap_view else "NONAKTIF")
     st.info(shadow_reason)
     st.caption("Aturan Fuzzy: " + str(shadow_current.get("Aksi_Aturan_Fuzzy", "TAHAN"))
-               + "; arah target yang ditampilkan: " + shadow_action
-               + ". Target juga bergerak menuju baseline median WOB lokal bila kondisi stabil.")
-    st.markdown("**Grafik WOB: data rig, rekomendasi, dan proyeksi model**")
-    st.caption("Ketiga kurva ini BELUM membentuk loop kendali tertutup. "
-               "Garis proyeksi Fuzzy-PID belum menerima WOB target SHADOW.")
+               + "; arah target: " + shadow_action + ". "
+               + ("Pada Co-Simulation, hanya keputusan Fuzzy dan pembatas risiko yang mengubah target."
+                  if co_active else "Mode SHADOW dapat menyesuaikan target menuju median WOB lokal."))
+    st.markdown("**Grafik WOB: data rig, target Fuzzy, dan respons Fuzzy-PID**" if co_active
+                else "**Grafik WOB: data rig, rekomendasi, dan proyeksi model**")
+    st.caption("Setpoint biru " + ("masuk ke PID, kuning adalah WOB respons model."
+                 if co_active else "masih SHADOW dan terpisah dari proyeksi PID lama."))
     indices = np.arange(max(0, index - 119), index + 1, dtype=int)
     x = (simulation_data["Depth_m"].iloc[indices].to_numpy(dtype=float)
          if has_depth else (indices+1).astype(float))
@@ -2980,10 +3265,11 @@ elif view_control:
          len(ap_view["hist"]["idx"]) if ap_view else 0),
         THEME_NAME, "WOB (kN)", "Kedalaman TMD (m)" if has_depth else "Sampel",
         x, wob_raw, wob_shadow, wob_model,
+        mode="COSIM" if co_active else "SHADOW",
     )
     show_image(st, png)
     if ap_view:
-        st.markdown("**Grafik ROP: data rig vs proyeksi model**")
+        st.markdown("**Grafik ROP: data rig vs keluaran plant simulasi**")
         aph = ap_view["hist"]
         lookup_rop = {int(i): float(v) for i, v in zip(aph["idx"], aph["ap_ROP"])}
         rop_model = np.array([lookup_rop.get(int(i), np.nan) for i in indices], dtype=float)
@@ -2991,20 +3277,24 @@ elif view_control:
         png_rop = render_comparison_png(
             ("rop", int(index), scenario, n, int(ap_view["uid"]), len(aph["idx"])),
             THEME_NAME, "ROP (m/h)", "Kedalaman TMD (m)" if has_depth else "Sampel",
-            x, rop_raw, np.full(len(indices), np.nan), rop_model,
+            x, rop_raw,
+            np.array([{int(i):float(v) for i,v in zip(aph["idx"],aph["ROP_fixed"])}.get(int(i),np.nan)
+                      for i in indices],dtype=float) if co_active else np.full(len(indices), np.nan),
+            rop_model, mode="COSIM" if co_active else "SHADOW",
         )
         show_image(st, png_rop)
     else:
-        st.caption("Aktifkan Auto-Pilot Fuzzy-PID untuk melihat kurva proyeksi model lama.")
+        st.caption("Aktifkan Fuzzy-PID untuk menjalankan model simulasi.")
 
     with st.expander("Detail Fuzzy-PID: gain, pengereman, dan riwayat", expanded=False):
         if ap_view:
-            st.metric("Pengereman putaran", f"{100*float(ap_view['brake']):.1f}%")
+            if not co_active:
+                st.metric("Pengereman putaran", f"{100*float(ap_view['brake']):.1f}%")
             gain_rows = [{"Kanal": DISPLAY_NAME.get(p,p),
                           "Kp": f"{ap_view['gains'][p][0]:.4f}",
                           "Ki": f"{ap_view['gains'][p][1]:.4f}",
                           "Kd": f"{ap_view['gains'][p][2]:.4f}"}
-                         for p in AP_CHANNEL_LIST]
+                         for p in (["WOB", "RPM"] if co_active else AP_CHANNEL_LIST)]
             call_wide(st.dataframe, pd.DataFrame(gain_rows), hide_index=True)
             hs = ap_view["hist"]
             frame_hist = pd.DataFrame({k:v for k,v in hs.items() if k != "t"})
@@ -3073,29 +3363,36 @@ else:
                                        pd.DataFrame(audit_rows).to_csv(index=False).encode("utf-8-sig"),
                                        "log_audit_ews.csv","text/csv",key="audit_csv")
     with tabs[1]:
-        st.markdown("**Ringkasan rekomendasi WOB SHADOW**")
+        st.markdown("**Hasil perhitungan Fuzzy " + ("Co-Simulation" if co_active else "SHADOW") + "**")
         directions = shadow_hist["Keputusan_Fuzzy"].value_counts()
         a,b,c = st.columns(3)
-        a.metric("Target naik", int(directions.get("NAIKKAN",0)))
-        b.metric("Target tahan", int(directions.get("TAHAN",0)))
-        c.metric("Target turun", int(directions.get("TURUNKAN",0)))
-        st.caption("Jumlah adalah perubahan rekomendasi per sampel. Bukan jumlah tindakan rig "
-                   "dan tidak mengukur penurunan NPT aktual.")
-        call_wide(st.dataframe,shadow_hist.tail(25),hide_index=True)
-        st.download_button("Unduh rekomendasi Fuzzy SHADOW CSV",
-                           shadow_hist.to_csv(index=False).encode("utf-8-sig"),
-                           "hasil_fuzzy_supervisor_shadow.csv","text/csv",key="results_shadow_csv")
+        a.metric("Setpoint naik", int(directions.get("NAIKKAN",0)))
+        b.metric("Setpoint tahan", int(directions.get("TAHAN",0)))
+        c.metric("Setpoint turun", int(directions.get("TURUNKAN",0)))
+        st.caption("Keputusan per sampel simulasi, BUKAN tindakan rig atau NPT aktual.")
+        if co_active:
+            st.markdown("**Perbandingan pada plant HIPOTETIS yang sama**")
+            call_wide(st.dataframe, cosim_summary(ap_view["hist"],params),hide_index=True)
+            st.caption("Nilai ROP model dihitung dari gangguan replay dan asumsi elastisitas WOB/RPM. "
+                       "Ini BUKAN validasi efek kendali pada rig ataupun bukti pengurangan NPT.")
+            log=pd.DataFrame({k:v for k,v in ap_view["hist"].items() if k!="t"})
+            log.insert(0,"timestamp_playback_buatan",[str(x) for x in ap_view["hist"]["t"]])
+            st.download_button("Unduh hasil Co-Simulation + pembanding CSV",
+                               log.to_csv(index=False).encode("utf-8-sig"),
+                               "hasil_cosimulation_fuzzy_pid.csv","text/csv",key="results_cosim_csv")
+        else:
+            st.caption("Mode SHADOW hanya menghitung rekomendasi; tidak membuktikan hasil kendali.")
+            st.download_button("Unduh rekomendasi Fuzzy SHADOW CSV",
+                               shadow_hist.to_csv(index=False).encode("utf-8-sig"),
+                               "hasil_fuzzy_supervisor_shadow.csv","text/csv",key="results_shadow_csv")
+        with st.expander("Riwayat keputusan lengkap",expanded=False):
+            call_wide(st.dataframe,shadow_hist.tail(25),hide_index=True)
         st.download_button("Unduh data replay terpilih CSV",
                            visible.to_csv(index=False).encode("utf-8-sig"),
                            "neac001_replay_terpilih.csv","text/csv",key="results_raw_csv")
-        if ap_view:
-            with st.expander("Perbandingan deskriptif data rig vs proyeksi model lama",expanded=False):
-                st.caption("Perbandingan ini BUKAN uji kausal adaptif vs tetap karena supervisor "
-                           "belum masuk ke pengendali dan model belum divalidasi.")
-                call_wide(st.dataframe,pd.DataFrame(kpi_rows_from_hist(ap_view["hist"])),hide_index=True)
-        st.info("Pengujian baseline vs adaptif CLOSED-LOOP belum tersedia. Dibutuhkan "
-                "model plant tervalidasi dan integrasi setpoint ke Fuzzy-PID. "
-                "Hasil di halaman ini adalah pengujian logika SHADOW.")
+        st.info("Batas ilmiah: ini penelitian SIMULASI OFFLINE dengan plant sementara. "
+                "Tidak ada koneksi Amphion/PDSI, identifikasi litologi/UCS, "
+                "pengukuran NPT, atau model Bingham pada versi ini.")
 
 # Perintah bunyi/getar/ACK tetap aktif pada ketiga dashboard.
 if snap["ack_required"] and snap["alarm"] and snap["alarm_fresh"]:
