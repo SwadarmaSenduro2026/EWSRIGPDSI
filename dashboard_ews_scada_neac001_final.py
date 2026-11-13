@@ -1,10 +1,3 @@
-# PDSI | Adaptive Drilling Simulator — FUZZY CO-SIMULATION (OFFLINE)
-# HMI 3 dashboard · SHADOW vs CO-SIMULATION · Python/Streamlit
-# Modifikasi dari versi HMI 3 dashboard yang digunakan sebelumnya.
-# PENTING: plant sensitivitas WOB/RPM masih hipotetis, bukan Bingham,
-# bukan kalibrasi performa rig dan tidak terhubung ke Amphion atau rig.
-# Hasil simulasi, EWS replay dan data asli dibedakan.
-
 import copy
 import hashlib
 import hmac
@@ -219,15 +212,12 @@ DEFAULT_PARAMS = {
     "wa_enabled": False,
     "wa_min_level": 2,
     # auto pilot Fuzzy-PID
-    "autopilot": True,
-    "control_mode": "Co-Simulation Fuzzy-PID",
+    "autopilot": False,
     "ap_wob_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_wob_sp"],
     "ap_rpm_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rpm_sp"],
     "ap_rop_target": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rop_target"],
     "ap_rise_med_pct": 15.0,
     "ap_rise_high_pct": 30.0,
-    "shadow_wob_ceiling_kn": 100.0,  # batas simulasi, BUKAN batas rig
-    "shadow_ramp_pct": 2.0,
 }
 
 PARAM_LABELS = {
@@ -248,14 +238,11 @@ PARAM_LABELS = {
     "wa_enabled": "Notifikasi WhatsApp",
     "wa_min_level": "Level minimum WhatsApp",
     "autopilot": "Mode auto pilot (Fuzzy-PID)",
-    "control_mode": "Mode pengujian fuzzy",
     "ap_wob_sp": "Auto pilot: setpoint WOB (kN)",
     "ap_rpm_sp": "Auto pilot: setpoint RPM",
     "ap_rop_target": "Auto pilot: target ROP (m/h)",
     "ap_rise_med_pct": "Auto pilot: kenaikan sedang (%)",
     "ap_rise_high_pct": "Auto pilot: kenaikan tinggi (%)",
-    "shadow_wob_ceiling_kn": "Batas WOB simulator (kN)",
-    "shadow_ramp_pct": "Batas perubahan target per sampel (%)",
 }
 
 MAX_CATCHUP_STEPS = 30
@@ -299,7 +286,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v9-three-dashboard-fuzzy-cosim"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v7-neac001"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -492,178 +479,6 @@ CABIN_CSS = """
 """
 
 
-
-PRESENTATION_CSS = """
-/* Kabin presentasi - tiga indikator utama dan ruang napas */
-.cabin-bar{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:6px 0 12px}
-.cabin-gauges{grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:10px}
-.gauge{border-radius:10px;padding:12px 14px;min-height:245px}
-.gauge .g-label{font-size:13px;letter-spacing:.07em}
-.gauge .g-value{font-size:30px}
-.cabin-stat{border-radius:8px;padding:12px}
-.status-compact{background:var(--surface);border:1px solid var(--border);border-left:5px solid var(--c);border-radius:9px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 18px;margin:7px 0 12px}
-.status-compact b{font-size:18px;color:var(--c)}
-.status-compact .meta{font-size:12px;color:var(--muted)}
-.decision-panel{background:var(--surface);border:1px solid var(--border);border-left:5px solid var(--accent);border-radius:10px;padding:15px 19px;margin:12px 0}
-.decision-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.decision-grid>div{background:var(--surface2);border-radius:8px;padding:10px}
-.decision-label{font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:700}
-.decision-value{font-size:24px;font-weight:800;color:var(--text)}
-.decision-reason{font-size:13px;color:var(--text);margin-top:10px;line-height:1.5}
-.ews-micro{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-.ews-bullet{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--c)}
-@media(max-width:1050px){.cabin-gauges{grid-template-columns:repeat(3,minmax(0,1fr))}.cabin-bar{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:670px){.cabin-gauges{grid-template-columns:repeat(1,minmax(0,1fr))}.decision-grid{grid-template-columns:repeat(2,1fr)}.gauge{min-height:unset}}
-"""
-
-
-
-# ==========================================================
-# VISUAL SCADA V2 — HANYA CSS, TANPA PERUBAHAN ALGORITMA
-# ==========================================================
-SCADA_VISUAL_CSS = """
-/* Panel status besar, tetapi tetap ringkas dan mudah dipahami */
-:root{--scada-blue:#1689c8;--scada-gold:#d9a127}
-[data-testid="stMainBlockContainer"], .block-container{max-width:1480px;padding-top:2rem}
-.ews-header{position:relative;padding:16px 20px;border-radius:11px;
-  border:1px solid var(--border);border-left:6px solid var(--accent);
-  background:linear-gradient(115deg,color-mix(in srgb,var(--accent) 13%,var(--surface)),var(--surface) 64%);
-  box-shadow:0 4px 18px rgba(10,20,40,.05)}
-.ews-title{font-size:clamp(17px,1.65vw,24px);letter-spacing:.045em}
-.ews-sub{color:var(--muted);letter-spacing:.065em;font-size:11px}
-.tag{border-radius:999px;padding:6px 11px;font-size:10px}
-.tag.sim{background:color-mix(in srgb,var(--lv1) 13%,var(--surface));color:var(--lv1)}
-.notice{border-radius:8px;background:color-mix(in srgb,var(--lv1) 7%,var(--surface));
-  border-left-width:4px;line-height:1.5;padding:10px 14px}
-
-/* Mode dan navigasi: terlihat seperti pilihan kontrol, tidak seperti radio teks */
-.st-key-view_mode div[role="radiogroup"]{display:flex;flex-wrap:wrap;gap:9px;padding:6px;
-  border:1px solid var(--border);border-radius:12px;background:var(--surface)}
-.st-key-view_mode label{background:var(--surface2);padding:9px 13px;border:1px solid var(--border);
-  border-radius:9px;min-height:40px;flex:1;white-space:normal;transition:background .15s ease}
-.st-key-view_mode label:has(input:checked){background:color-mix(in srgb,var(--accent) 15%,var(--surface));
-  border-color:var(--accent)}
-.st-key-view_mode label p{font-size:13px;font-weight:750}
-
-/* Status EWS memiliki warna solid sebagaimana HMI lama, tidak hanya tulisan */
-.status-hero{--c:var(--lv0);--pn:#16803C;display:grid;grid-template-columns:minmax(0,1fr) auto;
-  gap:10px 18px;align-items:center;background:linear-gradient(115deg,var(--pn),color-mix(in srgb,var(--pn) 80%,#14293e));
-  border-radius:11px;padding:16px 22px;color:white;margin:10px 0 14px;min-height:104px;
-  box-shadow:0 6px 22px rgba(12,27,44,.11)}
-.status-hero.lv1{color:#1b180b;background:linear-gradient(115deg,#f3bd3c,#ffd880)}
-.status-hero.lv2{background:linear-gradient(115deg,#bf2c32,#e65b54)}
-.status-hero.lv3{background:linear-gradient(115deg,#91137d,#c334ac)}
-.status-hero.lverr{background:linear-gradient(115deg,#475569,#75849a)}
-.status-kicker-new{font-size:10px;letter-spacing:.13em;font-weight:800;text-transform:uppercase;opacity:.87}
-.status-main-new{font-size:clamp(23px,2.5vw,34px);font-weight:850;letter-spacing:.025em;line-height:1.2;margin:3px 0}
-.status-explain-new{font-size:12px;opacity:.91;line-height:1.45}
-.status-side-new{text-align:right;font-size:12px;line-height:1.8;font-weight:650;max-width:390px}
-.status-mode-new{display:inline-block;border:1px solid rgba(255,255,255,.6);
-  padding:2px 10px;border-radius:999px;margin-bottom:6px;font-size:11px}
-.status-hero.lv1 .status-mode-new{border-color:rgba(20,20,20,.4)}
-
-/* Headings yang kuat tetapi tidak menumpuk ruang vertikal */
-.ui-section{border-left:5px solid var(--accent);border-bottom:1px solid var(--border);
-  border-radius:4px;padding:6px 0 7px 13px;margin:12px 0 11px}
-.ui-section .ui-section-title{font-size:clamp(19px,2vw,27px);font-weight:850;
-  line-height:1.2;letter-spacing:-.01em;color:var(--text)}
-.ui-section .ui-section-sub{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45}
-.ui-section.tone-blue{border-left-color:var(--accent)}
-.ui-section.tone-green{border-left-color:var(--lv0)}
-.ui-section.tone-red{border-left-color:var(--lv2)}
-
-/* Kartu ringkas untuk metrik yang dahulu hanya angka polos */
-.ui-kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:8px 0 14px}
-.ui-kpi-grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
-.ui-kpi-grid.cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
-.ui-kpi{--tone:var(--accent);position:relative;min-width:0;background:
-  linear-gradient(125deg,color-mix(in srgb,var(--tone) 10%,var(--surface)),var(--surface) 80%);
-  border:1px solid color-mix(in srgb,var(--tone) 35%,var(--border));border-radius:11px;
-  border-top:4px solid var(--tone);padding:15px 16px;overflow:hidden}
-.ui-kpi.tone-blue{--tone:var(--accent)}.ui-kpi.tone-green{--tone:var(--lv0)}
-.ui-kpi.tone-amber{--tone:var(--lv1)}.ui-kpi.tone-red{--tone:var(--lv2)}
-.ui-kpi.tone-magenta{--tone:var(--lv3)}.ui-kpi.tone-neutral{--tone:var(--muted)}
-.ui-kpi .ui-kpi-label{color:var(--muted);font-size:11px;text-transform:uppercase;
-  font-weight:750;letter-spacing:.055em;line-height:1.35}
-.ui-kpi .ui-kpi-value{font-size:clamp(20px,2vw,29px);color:var(--text);font-weight:850;
-  line-height:1.15;margin-top:7px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.ui-kpi .ui-kpi-desc{color:var(--muted);font-size:11px;line-height:1.3;margin-top:6px}
-
-/* Kartu status per kanal: hijau/kuning/merah/magenta langsung terlihat */
-.channel-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:12px 0 16px}
-.channel-card{--tone:var(--lv0);border:1px solid color-mix(in srgb,var(--tone) 42%,var(--border));
-  background:linear-gradient(125deg,color-mix(in srgb,var(--tone) 14%,var(--surface)),var(--surface) 85%);
-  border-top:5px solid var(--tone);border-radius:10px;padding:13px 12px;min-width:0}
-.channel-card.lv1{--tone:var(--lv1)}.channel-card.lv2{--tone:var(--lv2)}
-.channel-card.lv3{--tone:var(--lv3)}.channel-card.lverr{--tone:var(--lverr)}
-.channel-name{font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.07em}
-.channel-status{font-size:clamp(16px,1.7vw,23px);font-weight:900;color:var(--tone);
-  overflow-wrap:anywhere;margin:9px 0 5px;letter-spacing:.025em}
-.channel-reading{font-size:12px;color:var(--text);font-variant-numeric:tabular-nums}
-
-/* Gauge: mempertahankan skala, jarum, setpoint, dan zona yang sudah ada */
-.cabin-stat{background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--accent);
-  border-radius:10px;padding:13px 15px;box-shadow:0 2px 12px rgba(10,20,40,.035)}
-.cabin-stat .k{font-size:11px}.cabin-stat .v{font-size:clamp(20px,2vw,27px)}
-.cabin-stat .bar{height:6px;margin-top:10px}
-.cabin-gauges{gap:14px;margin:12px 0 8px}
-.gauge{background:linear-gradient(180deg,color-mix(in srgb,var(--c) 7%,var(--surface)),var(--surface) 45%);
-  border:1px solid color-mix(in srgb,var(--c) 35%,var(--border));border-top:5px solid var(--c);
-  border-radius:12px;padding:14px 18px;min-height:0;box-shadow:0 3px 16px rgba(10,20,40,.055)}
-.gauge .g-label{font-size:13px;font-weight:850}
-.gauge svg{max-height:210px;margin:0 auto}
-.gauge .g-value{font-size:clamp(26px,2.5vw,35px);margin-bottom:6px}
-.gauge .g-sub{font-size:11px;margin-top:10px}
-.gauge .chip{background:color-mix(in srgb,var(--c) 12%,var(--surface));
-  border:1px solid color-mix(in srgb,var(--c) 40%,var(--border));
-  padding:5px 10px;border-radius:999px;justify-content:center}
-
-/* Keputusan Fuzzy diberi warna sesuai arah keputusan tanpa memengaruhi logika */
-.decision-panel{--decision-color:var(--accent);background:linear-gradient(115deg,
-  color-mix(in srgb,var(--decision-color) 13%,var(--surface)),var(--surface) 70%);
-  border:1px solid color-mix(in srgb,var(--decision-color) 40%,var(--border));
-  border-left:6px solid var(--decision-color);border-radius:12px;padding:17px 19px;margin:15px 0}
-.decision-panel.action-up{--decision-color:var(--lv0)}
-.decision-panel.action-down{--decision-color:var(--lv2)}
-.decision-panel.action-hold{--decision-color:var(--accent)}
-.decision-grid>div{border:1px solid var(--border);border-radius:9px;
-  background:color-mix(in srgb,var(--decision-color) 6%,var(--surface));min-width:0}
-.decision-value{color:var(--text);font-size:clamp(17px,2vw,25px);overflow-wrap:anywhere}
-.decision-reason{border-top:1px solid var(--border);padding-top:11px;margin-top:13px}
-.ui-reason{border:1px solid color-mix(in srgb,var(--accent) 42%,var(--border));
-  border-left:5px solid var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--surface));
-  border-radius:9px;padding:12px 15px;font-size:14px;line-height:1.5;color:var(--text);margin:8px 0}
-.ui-reason b{color:var(--accent)}
-.ui-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--muted);
-  padding:8px 11px;margin:4px 0 10px;border:1px dashed var(--border);border-radius:8px}
-.ui-legend .spot{display:inline-block;width:9px;height:9px;border-radius:100%;margin-right:6px}
-
-/* Grafik dan panel: beri ritme dan pemisahan tanpa menambah dashboard */
-[data-testid="stImage"] img{border:1px solid var(--border);border-radius:11px;background:var(--surface)}
-[data-testid="stExpander"]{border-radius:10px;background:var(--surface)}
-[data-testid="stTabs"] button[role="tab"]{font-weight:750;padding:9px 16px}
-[data-testid="stTabs"] button[aria-selected="true"]{color:var(--accent)}
-[data-testid="stSidebar"]{background:var(--surface)}
-[data-testid="stSidebar"] [data-testid="stSelectbox"]{margin-bottom:4px}
-[data-testid="stSidebar"] .side-title{color:var(--accent);border-bottom:2px solid var(--border);padding-bottom:9px}
-
-@media(max-width:1100px){
- .ui-kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
- .channel-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
-}
-@media(max-width:680px){
- .status-hero{grid-template-columns:1fr;padding:13px 15px}
- .status-side-new{text-align:left}
- .channel-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
- .cabin-gauges{grid-template-columns:1fr}
- .ui-kpi-grid,.ui-kpi-grid.cols-3,.ui-kpi-grid.cols-2{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
- .ui-kpi{padding:11px 10px}
- .ui-kpi .ui-kpi-value{font-size:20px}
- .decision-grid{grid-template-columns:1fr}
- .st-key-view_mode label{flex:1 0 100%}
-}
-"""
-
 def build_css(mode):
     """CSS tema. Jika mode tidak terdeteksi, ikuti pengaturan sistem (OS)."""
     if mode in PALETTES:
@@ -674,7 +489,7 @@ def build_css(mode):
             "@media (prefers-color-scheme: light){:root{"
             + _palette_vars(PALETTES["light"]) + "}}"
         )
-    return "<style>" + root + BASE_CSS + CABIN_CSS + PRESENTATION_CSS + SCADA_VISUAL_CSS + "</style>"
+    return "<style>" + root + BASE_CSS + CABIN_CSS + "</style>"
 
 
 THEME = detect_theme()
@@ -703,7 +518,6 @@ def fresh_state():
         "alarm": None,
         "wa_last": {},
         "ap": None,      # keadaan pengendali auto pilot
-        "cosim": None,   # keadaan model loop tertutup fuzzy, terpisah dari data replay
         "n": 1,          # jumlah baris sumber data saat ini
     }
 
@@ -1136,7 +950,7 @@ def get_signals(source, index, params):
 
     rates = {}
     window = int(params["roc_window"])
-    if params["roc_enabled"] and index >= window and "Depth_m" not in source.columns:
+    if params["roc_enabled"] and index >= window:
         past = source.iloc[index - window]
         seconds = (row["timestamp"] - past["timestamp"]).total_seconds()
         if seconds > 0:
@@ -1728,10 +1542,7 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         if steps == 0:
             evaluate(source, params, state, False, wa_cfg)
 
-        if params.get("control_mode") == "Co-Simulation Fuzzy-PID":
-            cosim_sync(source, params, state)
-        else:
-            ap_sync(source, params, state)
+        ap_sync(source, params, state)
 
         effective_stale = max(float(params["stale_after"]), 2.0 * interval + 1.0)
         age = now - state["last_data_time"]
@@ -1745,10 +1556,7 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
 
         alarm = dict(state["alarm"]) if state["alarm"] else None
         ack = dict(state["ack"]) if state["ack"] else None
-        ap_state = (state.get("cosim") if (params.get("control_mode") == "Co-Simulation Fuzzy-PID"
-                    and params.get("autopilot",False)) else
-                    None if params.get("control_mode") == "Co-Simulation Fuzzy-PID"
-                    else state["ap"])
+        ap_state = state["ap"]
         ap_snapshot = None
         if ap_state and ap_state["hist"]["t"]:
             ap_snapshot = {
@@ -1766,8 +1574,6 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         snapshot = {
             "ap": ap_snapshot,
             "ap_on": bool(params["autopilot"]),
-            "co_active": bool(params.get("control_mode") == "Co-Simulation Fuzzy-PID"
-                              and params["autopilot"] and ap_snapshot is not None),
             "index": max(0, min(state["index"], n - 1)),
             "events": list(state["events"]),
             "params": copy.deepcopy(params),
@@ -1790,389 +1596,6 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         }
 
     return source, snapshot
-
-
-# ==========================================================
-# FUZZY SUPERVISOR BERBASIS TELEMETRI (SHADOW)
-# Menggunakan sinyal yang SUDAH dibaca; bukan klasifikasi batuan.
-# Tidak dikirim sebagai setpoint Fuzzy-PID pada versi ini.
-# ==========================================================
-def _membership_ramp(value, start, end):
-    """Membership linier 0..1; parameter angka tak berdimensi."""
-    return float(np.clip((float(value) - start) / max(end - start, 1e-9), 0., 1.))
-
-
-def fuzzy_supervisor_rule(eff_ratio, torque_ratio, spp_ratio, wob_ratio, rpm_ratio):
-    """Sugeno 0-order: tiga rekomendasi (naik, tahan, turun).
-
-    Nilai ambang adalah HIPOTESIS eksperimen (bukan operating envelope rig).
-    ROP norm mengurangi efek WOB/RPM, tetapi bukan estimator UCS/litologi.
-    """
-    vals = [eff_ratio, torque_ratio, spp_ratio, wob_ratio, rpm_ratio]
-    if any(v is None or not np.isfinite(float(v)) or float(v) <= 0 for v in vals):
-        return {"action": "TAHAN", "delta_pct": 0., "rise": 0., "risk": 0.,
-                "confidence": 0., "reason": "Data telemetri belum cukup atau tidak valid"}
-
-    low_eff = _membership_ramp(0.98 - eff_ratio, 0., 0.22)
-    torque_risk = _membership_ramp(torque_ratio, 1.03, 1.22)
-    spp_risk = _membership_ramp(spp_ratio, 1.03, 1.20)
-    risk = max(torque_risk, spp_risk)
-    changed_wob = _membership_ramp(abs(wob_ratio - 1.), 0.10, 0.25)
-    changed_rpm = _membership_ramp(abs(rpm_ratio - 1.), 0.08, 0.22)
-    confidence = 1.0 - max(changed_wob, changed_rpm)
-    # Aturan utama: ROP tidak efisien + kondisi stabil -> naik sedikit;
-    # risiko Torque/SPP meningkat -> turun; input belum jelas -> tahan.
-    rise = min(low_eff, 1.0 - risk, confidence)
-    fall = risk
-    hold = max(0.30, 1.0 - max(rise, fall), 1.0 - confidence)
-    # Defuzzifikasi rata-rata berbobot (Sugeno orde nol).
-    delta_pct = (12.0 * rise - 16.0 * fall) / max(rise + fall + hold, 1e-9)
-    if fall >= 0.45 and delta_pct < -1.0:
-        action = "TURUNKAN"
-        reason = "Torque/WOB atau SPP relatif meningkat; pembebanan ditahan"
-    elif rise >= 0.25 and delta_pct > 1.0:
-        action = "NAIKKAN"
-        reason = "Efisiensi ROP menurun, WOB/RPM cukup stabil, indikator risiko rendah"
-    else:
-        action = "TAHAN"
-        reason = ("WOB/RPM berubah; kesimpulan efisiensi belum kuat" if confidence < 0.5
-                  else "Perubahan efisiensi atau risiko belum cukup kuat")
-    return {"action": action, "delta_pct": float(delta_pct),
-            "rise": float(rise), "risk": float(risk),
-            "confidence": float(confidence), "reason": reason}
-
-
-def fuzzy_supervisor_history(source, base_wob, ceiling_kn=100., ramp_pct=2., window=12):
-    """Riwayat keputusan dari data yang SUDAH terbaca (tanpa look-ahead).
-
-    WOB acuan menggunakan median 24 sampel terakhir (bukan formasi buatan).
-    Perubahan target dibatasi maksimum ramp_pct % dari acuan per sampel.
-    """
-    n=len(source)
-    columns=["Baris", "Depth_m", "WOB_mentah_kN", "WOB_acuan_kN",
-             "WOB_kandidat_kN", "WOB_shadow_kN", "Keputusan_Fuzzy", "Aksi_Aturan_Fuzzy",
-             "Rasio_ROP_norm", "Rasio_Torque_per_WOB", "Rasio_SPP",
-             "Rasio_WOB", "Rasio_RPM", "Skor_naik", "Skor_risiko",
-             "Kepercayaan", "Alasan_Fuzzy"]
-    if n == 0: return pd.DataFrame(columns=columns)
-    if min(float(base_wob), float(ceiling_kn), float(ramp_pct)) <= 0:
-        raise ValueError("Setpoint, ceiling, dan ramp harus lebih besar dari nol")
-    wob=pd.to_numeric(source["WOB"],errors="coerce")
-    rpm=pd.to_numeric(source["RPM"],errors="coerce")
-    rop=pd.to_numeric(source["ROP"],errors="coerce")
-    torque=pd.to_numeric(source["Torque"],errors="coerce")
-    spp=pd.to_numeric(source["StandpipePressure"],errors="coerce")
-    good=((wob>0)&(wob<=500)&(rpm>0)&(rpm<=300)&
-          (rop>0)&(rop<=500)&(torque>=0)&(torque<=100)&
-          (spp>0)&(spp<=15000))
-    eff=(rop/(wob.pow(0.6)*rpm.pow(0.5))).where(good)
-    torque_wob=(torque/wob).where(good)
-    valid_spp=spp.where(good)
-    valid_wob=wob.where(good)
-    valid_rpm=rpm.where(good)
-    # Setiap pembanding mengacu pada 12 pembacaan sebelumnya (bukan future rows).
-    def ratios(series):
-        previous=series.shift(window).rolling(window,min_periods=window).median()
-        recent=series.rolling(window,min_periods=window).median()
-        return (recent/previous.replace(0,np.nan)).to_numpy(dtype=float)
-    metric_arrays=[ratios(s) for s in (eff,torque_wob,valid_spp,valid_wob,valid_rpm)]
-    baseline=valid_wob.rolling(24,min_periods=5).median().to_numpy(dtype=float)
-    depth=(pd.to_numeric(source["Depth_m"],errors="coerce").to_numpy(dtype=float)
-           if "Depth_m" in source else np.full(n,np.nan))
-    records=[]
-    first=float(wob.iloc[0]) if np.isfinite(wob.iloc[0]) and wob.iloc[0]>0 else float(base_wob)
-    previous=float(np.clip(first,0.01,ceiling_kn))
-    for i in range(n):
-        local=float(baseline[i]) if np.isfinite(baseline[i]) and baseline[i]>0 else float(base_wob)
-        local=min(local,float(ceiling_kn))
-        vals=[float(arr[i]) for arr in metric_arrays]
-        decision=fuzzy_supervisor_rule(*vals)
-        # Target relatif terhadap WOB acuan LOKAL, tetapi tidak mengekstrapolasi
-        # kondisi batuan. Koreksi fuzzy, perubahan acuan, dan keputusan dipisahkan.
-        suggested=local*(1.+decision["delta_pct"]/100.)
-        if decision["confidence"]<0.5:
-            desired=previous  # kurang stabil/baru 1-23 sampel: tahan
-        elif decision["action"]=="NAIKKAN":
-            desired=max(suggested,previous+local*0.01*decision["rise"])
-        elif decision["action"]=="TURUNKAN":
-            desired=min(suggested,previous-local*0.01*decision["risk"])
-        else:
-            desired=local  # tanpa koreksi fuzzy, kembali bertahap ke acuan
-        # Rasionalisasi status HMI: tampilkan arah perubahan target sesungguhnya.
-        reasons=decision["reason"]
-        if decision["action"]=="TAHAN" and decision["confidence"]>=0.5:
-            reasons += "; target dinormalisasi bertahap ke median WOB lokal"
-        desired=float(np.clip(desired,0.01,ceiling_kn))
-        max_step=max(0.01,local*float(ramp_pct)/100.)
-        target=float(np.clip(desired,previous-max_step,previous+max_step))
-        target=float(np.clip(target,0.01,ceiling_kn))
-        actual_action=("NAIKKAN" if target>previous+0.01 else
-                       "TURUNKAN" if target<previous-0.01 else "TAHAN")
-        previous=target
-        records.append((i+1,float(depth[i]),float(wob.iloc[i]) if np.isfinite(wob.iloc[i]) else np.nan,
-                        local,desired,target,actual_action,decision["action"],
-                        *vals,decision["rise"],decision["risk"],
-                        decision["confidence"],reasons))
-    return pd.DataFrame.from_records(records,columns=columns)
-
-
-@st.cache_data(show_spinner=False,max_entries=4)
-def cached_fuzzy_supervisor(source,base_wob,ceiling_kn,ramp_pct):
-    return fuzzy_supervisor_history(source,base_wob,ceiling_kn,ramp_pct)
-
-
-def fuzzy_snapshot(source,params,index,ews_level=0,fault=False):
-    """Satu sumber target SHADOW: Kabin, panel Kontrol, dan CSV."""
-    all_hist=cached_fuzzy_supervisor(
-        source,float(params["ap_wob_sp"]),
-        float(params.get("shadow_wob_ceiling_kn",100.)),
-        float(params.get("shadow_ramp_pct",2.)))
-    idx=max(0,min(int(index),len(all_hist)-1))
-    hist=all_hist.iloc[:idx+1].copy()
-    current=hist.iloc[-1].to_dict()
-    target=float(current["WOB_shadow_kN"])
-    last_target=(float(hist.iloc[-2]["WOB_shadow_kN"])
-                 if len(hist)>1 else float(params["ap_wob_sp"]))
-    note=str(current["Alasan_Fuzzy"])
-    if fault or int(ews_level)>=2:
-        target=min(target,last_target)  # raw EWS sebagai pembatas tambahan saja
-        note+="; target tidak dinaikkan: alarm/gangguan data"
-    elif int(ews_level)==1 and target>last_target:
-        target=last_target
-        note+="; EWS kuning: kenaikan dibatasi"
-    current["WOB_shadow_kN"]=target
-    current["Alasan_Fuzzy"]=note
-    current["Keputusan_Fuzzy"]=("TURUNKAN" if target<last_target-0.01
-                                else "TAHAN" if abs(target-last_target)<=0.01
-                                else current["Keputusan_Fuzzy"])
-    hist.loc[hist.index[-1],"WOB_shadow_kN"]=target
-    hist.loc[hist.index[-1],"Alasan_Fuzzy"]=note
-    return current,hist
-
-
-
-
-# ==========================================================
-# CO-SIMULATION FUZZY-PID (PENELITIAN/OFFLINE)
-# Supervisor membaca feedback model sampai sampel SEBELUMNYA.
-# Fuzzy-PID lama (fpid_step) melacak setpoint WOB dan RPM.
-# Plant empiris adalah PROXY sensitivitas terhadap WOB/RPM, bukan Bingham,
-# bukan model rig tervalidasi dan BUKAN perintah ke rig PDSI.
-# ==========================================================
-COSIM_WINDOW = 12
-COSIM_WOB_EXP = 0.60  # hipotesis sensitivitas, perlu validasi empiris
-COSIM_RPM_EXP = 0.45
-COSIM_TORQUE_WOB_EXP = 0.30
-COSIM_TORQUE_RPM_EXP = 0.30
-
-
-def cosim_new(row, params):
-    def valid_initial(key, fallback):
-        v = float(row.get(key, float("nan")))
-        return v if np.isfinite(v) and v > 0 else float(fallback)
-    raw_wob = valid_initial("WOB", params["ap_wob_sp"])
-    raw_rpm = valid_initial("RPM", params["ap_rpm_sp"])
-    raw_rop = valid_initial("ROP", params["ap_rop_target"])
-    raw_torque = valid_initial("Torque", 0.01)
-    raw_spp = valid_initial("StandpipePressure", 1000.0)
-    ap = {
-        "ch": {p: new_channel(v) for p,v in {
-            "WOB":raw_wob,"RPM":raw_rpm,"ROP":raw_rop,
-            "Torque":raw_torque,"StandpipePressure":raw_spp}.items()},
-        "fixed_ch": {"WOB":new_channel(raw_wob)},
-        "prev_target": float(params["ap_wob_sp"]),
-        "safe_raw": {"WOB":raw_wob,"RPM":raw_rpm,"ROP":raw_rop,
-                     "Torque":raw_torque,"StandpipePressure":raw_spp},
-        "hist": {key:[] for key in (
-            "t","idx","depth","wob_cmd","rpm_cmd","raw_WOB","raw_ROP",
-            "raw_RPM","raw_Torque","raw_StandpipePressure","ap_WOB","ap_ROP",
-            "ap_RPM","ap_Torque","ap_StandpipePressure","WOB_fixed","ROP_fixed",
-            "Torque_fixed","Fuzzy_action","Fuzzy_rule","Fuzzy_reason",
-            "Fuzzy_delta_pct","Eff_ratio","Torque_ratio","SPP_ratio",
-            "WOB_ratio","RPM_ratio","Risk_score","Confidence",
-            "model_ews_level","WOB_sebelumnya","WOB_acuan_kN",
-            "kp_wob","ki_wob","kd_wob")},
-        "brake":0., "boost":0., "rise_t":0., "rise_p":0.,
-        "nom":{"Torque":raw_torque,"StandpipePressure":raw_spp},
-        "last_index":None, "active":True,
-        "scenario":params["scenario"], "uid":int(time.time()*1000),
-    }
-    return ap
-
-
-def cosim_feedback_ratios(hist, window=COSIM_WINDOW):
-    """Jendela hanya dari keluaran plant pada sampel yang TELAH diproses."""
-    n=len(hist["ap_ROP"])
-    if n < 2*window:
-        return [float("nan")]*5
-    def median_ratio(values):
-        arr=np.asarray(values[-2*window:],dtype=float)
-        if not np.isfinite(arr).all() or (arr<=0).any(): return float("nan")
-        before=float(np.median(arr[:window])); after=float(np.median(arr[window:]))
-        return after/before if before>1e-9 else float("nan")
-    eff=[]; torque_wob=[]
-    for rop,wob,rpm,tor in zip(hist["ap_ROP"][-2*window:],
-                               hist["ap_WOB"][-2*window:],
-                               hist["ap_RPM"][-2*window:],
-                               hist["ap_Torque"][-2*window:]):
-        if min(rop,wob,rpm,tor)<=0:
-            return [float("nan")]*5
-        eff.append(rop/(wob**0.6*rpm**0.5))
-        torque_wob.append(tor/wob)
-    return [median_ratio(v) for v in
-            (eff,torque_wob,hist["ap_StandpipePressure"],
-             hist["ap_WOB"],hist["ap_RPM"])]
-
-
-def cosim_step(ap, row, params, index, timestamp):
-    """Satu langkah loop: feedback lama -> fuzzy -> WOB target -> PID -> plant.
-
-    Playback di sampel sekarang hanya sumber gangguan/acuan. Data masa depan
-    tidak digunakan. Konstanta plant adalah asumsi demonstrasi.
-    """
-    h=ap["hist"]
-    previous=float(ap["prev_target"])
-    ceiling=float(params.get("shadow_wob_ceiling_kn",100.0))
-    ramp=float(params.get("shadow_ramp_pct",2.0))/100.
-    base=float(params["ap_wob_sp"])
-    floor=max(0.5,min(ceiling,0.55*base))
-    allowed=max(0.05,base*ramp)
-    vals=cosim_feedback_ratios(h)
-    decision=fuzzy_supervisor_rule(*vals)
-    valid=True; observed={}
-    for p, lo, hi in (("ROP",0.001,500.),("WOB",0.001,500.),
-                      ("RPM",0.001,300.),("Torque",0.001,100.),
-                      ("StandpipePressure",0.001,15000.)):
-        v=float(row.get(p,float("nan")))
-        if not np.isfinite(v) or not (lo<=v<=hi):
-            valid=False; v=ap["safe_raw"][p]
-        observed[p]=v
-    if valid:
-        ap["safe_raw"]=dict(observed)
-    # Hanya keluaran dengan aksi Fuzzy jelas yang mengubah setpoint.
-    proposed=previous
-    rule_action=decision["action"]
-    reason=decision["reason"]
-    if not valid:
-        rule_action="TAHAN"
-        reason="Data tidak valid: gunakan sampel terakhir yang valid; target ditahan"
-    elif rule_action in ("NAIKKAN","TURUNKAN"):
-        proposed=previous*(1.+decision["delta_pct"]/100.)
-    # Batas berbasis nilai mentah yang kini dibaca: indikasi bahaya menahan
-    # kenaikan WOB pada model; tidak mengubah/menimpa mesin ACK replay.
-    raw_risk=max(level_for(observed[p],params["thresholds"][p])
-                 for p in ("Torque","StandpipePressure","WOB"))
-    if valid and raw_risk>=2:
-        proposed=min(proposed,previous-allowed)
-        reason+="; pembatas EWS replay MERAH/MAGENTA (torsi/SPP/WOB)"
-    elif valid and raw_risk==1 and proposed>previous:
-        proposed=previous
-        reason+="; EWS KUNING: kenaikan WOB ditahan"
-    if not valid: proposed=previous
-    target=float(np.clip(proposed,previous-allowed,previous+allowed))
-    target=float(np.clip(target,floor,ceiling))
-    movement=("NAIKKAN" if target>previous+0.01 else
-              "TURUNKAN" if target<previous-0.01 else "TAHAN")
-    ap["prev_target"]=target
-
-    # Kedua kontroler memakai fungsi Fuzzy-PID persis sama dan keadaan awal sama.
-    wob_y=fpid_step(ap["ch"]["WOB"],"WOB",target,base)
-    wob_fixed=fpid_step(ap["fixed_ch"]["WOB"],"WOB",base,base)
-    rpm_y=fpid_step(ap["ch"]["RPM"],"RPM",float(params["ap_rpm_sp"]),
-                    float(params["ap_rpm_sp"]))
-    # Respons counterfactual: gangguan dasar adalah nilai replay saat ini.
-    # Nilai plant TIDAK masuk kembali ke data NEAC-001 yang tersimpan.
-    wr=float(np.clip(wob_y/max(observed["WOB"],0.01),0.5,1.5))
-    wf=float(np.clip(wob_fixed/max(observed["WOB"],0.01),0.5,1.5))
-    rr=float(np.clip(rpm_y/max(observed["RPM"],0.01),0.5,1.5))
-    rop_y=float(np.clip(observed["ROP"]*wr**COSIM_WOB_EXP*rr**COSIM_RPM_EXP,0.,500.))
-    rop_fixed=float(np.clip(observed["ROP"]*wf**COSIM_WOB_EXP*rr**COSIM_RPM_EXP,0.,500.))
-    torque_y=float(observed["Torque"]*wr**COSIM_TORQUE_WOB_EXP*rr**COSIM_TORQUE_RPM_EXP)
-    torque_fixed=float(observed["Torque"]*wf**COSIM_TORQUE_WOB_EXP*rr**COSIM_TORQUE_RPM_EXP)
-    # SPP sebagai gangguan/eksogen: dataset tidak memberi model hidraulik.
-    spp_y=float(observed["StandpipePressure"])
-    model_lv=max(level_for(torque_y,params["thresholds"]["Torque"]),
-                 level_for(spp_y,params["thresholds"]["StandpipePressure"]),
-                 level_for(wob_y,params["thresholds"]["WOB"]))
-    ap["ch"]["ROP"]["y"]=rop_y
-    ap["ch"]["Torque"]["y"]=torque_y
-    ap["ch"]["StandpipePressure"]["y"]=spp_y
-    depth=float(row.get("Depth_m",float("nan")))
-    data={"t":timestamp,"idx":int(index),"depth":depth,"wob_cmd":target,
-          "rpm_cmd":float(params["ap_rpm_sp"]),"raw_WOB":float(row["WOB"]),
-          "raw_ROP":float(row["ROP"]),"raw_RPM":float(row["RPM"]),
-          "raw_Torque":float(row["Torque"]),
-          "raw_StandpipePressure":float(row["StandpipePressure"]),
-          "ap_WOB":wob_y,"ap_ROP":rop_y,"ap_RPM":rpm_y,
-          "ap_Torque":torque_y,"ap_StandpipePressure":spp_y,
-          "WOB_fixed":wob_fixed,"ROP_fixed":rop_fixed,
-          "Torque_fixed":torque_fixed,"Fuzzy_action":movement,
-          "Fuzzy_rule":rule_action,"Fuzzy_reason":reason,
-          "Fuzzy_delta_pct":decision["delta_pct"],
-          "Eff_ratio":vals[0],"Torque_ratio":vals[1],
-          "SPP_ratio":vals[2],"WOB_ratio":vals[3],"RPM_ratio":vals[4],
-          "Risk_score":decision["risk"],"Confidence":decision["confidence"],
-          "model_ews_level":model_lv,"WOB_sebelumnya":previous,
-          "WOB_acuan_kN":previous,"kp_wob":ap["ch"]["WOB"]["kp"],
-          "ki_wob":ap["ch"]["WOB"]["ki"],"kd_wob":ap["ch"]["WOB"]["kd"]}
-    for k in h: h[k].append(data[k])
-    ap["last_index"]=index
-
-
-def cosim_sync(source,params,state):
-    """Sinkronkan loop berdasarkan indeks playback bersama; tidak pada refresh UI."""
-    if not params.get("autopilot",False):
-        if state.get("cosim") is not None:state["cosim"]["active"]=False
-        return
-    index=int(np.clip(state["index"],0,len(source)-1))
-    ap=state.get("cosim")
-    restart=(ap is None or not ap.get("active") or
-             ap.get("scenario")!=params["scenario"] or
-             ap.get("last_index") is None or index<ap["last_index"])
-    if restart:
-        ap=state["cosim"]=cosim_new(source.iloc[0],params)
-        begin=0
-    else:
-        begin=ap["last_index"]+1
-    for i in range(begin,index+1):
-        cosim_step(ap,source.iloc[i],params,i,source["timestamp"].iloc[i])
-
-
-def cosim_summary(hist,params):
-    """Perbandingan SIMULASI pada plant hipotetis yang sama, bukan NPT aktual."""
-    if not hist or not hist.get("ap_WOB"):return pd.DataFrame()
-    def vals(k):return np.asarray(hist[k],dtype=float)
-    adaptive_rop=vals("ap_ROP"); fixed_rop=vals("ROP_fixed")
-    adaptive_wob=vals("ap_WOB");fixed_wob=vals("WOB_fixed")
-    adaptive_target=vals("wob_cmd")
-    base=float(params["ap_wob_sp"])
-    return pd.DataFrame([
-        {"Indikator":"ROP rata-rata model (m/h)","Setpoint tetap":round(float(np.nanmean(fixed_rop)),3),"Setpoint adaptif":round(float(np.nanmean(adaptive_rop)),3)},
-        {"Indikator":"WOB rata-rata model (kN)","Setpoint tetap":round(float(np.nanmean(fixed_wob)),3),"Setpoint adaptif":round(float(np.nanmean(adaptive_wob)),3)},
-        {"Indikator":"Error tracking WOB (MAE, kN)","Setpoint tetap":round(float(np.nanmean(abs(fixed_wob-base))),3),"Setpoint adaptif":round(float(np.nanmean(abs(adaptive_wob-adaptive_target))),3)},
-        {"Indikator":"Torsi puncak model (kN.m)","Setpoint tetap":round(float(np.nanmax(vals("Torque_fixed"))),3),"Setpoint adaptif":round(float(np.nanmax(vals("ap_Torque"))),3)},
-    ])
-
-
-def cosim_fuzzy_frame(hist):
-    """Pemetaan hasil simulator agar seluruh dashboard memakai satu target."""
-    if not hist or not hist.get("wob_cmd"):return pd.DataFrame()
-    n=len(hist["wob_cmd"])
-    return pd.DataFrame({
-        "Baris":np.asarray(hist["idx"])+1,"Depth_m":hist["depth"],
-        "WOB_mentah_kN":hist["raw_WOB"],
-        "WOB_acuan_kN":hist["WOB_acuan_kN"],
-        "WOB_shadow_kN":hist["wob_cmd"],
-        "Keputusan_Fuzzy":hist["Fuzzy_action"],
-        "Aksi_Aturan_Fuzzy":hist["Fuzzy_rule"],
-        "Alasan_Fuzzy":hist["Fuzzy_reason"],
-        "Rasio_ROP_norm":hist["Eff_ratio"],
-        "Rasio_Torque_per_WOB":hist["Torque_ratio"],
-        "Rasio_SPP":hist["SPP_ratio"],
-        "Rasio_WOB":hist["WOB_ratio"],"Rasio_RPM":hist["RPM_ratio"],
-        "Skor_risiko":hist["Risk_score"],
-        "Kepercayaan":hist["Confidence"],
-        "WOB_model_kN":hist["ap_WOB"],"ROP_model_m_per_h":hist["ap_ROP"]})
 
 
 # ==========================================================
@@ -2211,8 +1634,6 @@ def apply_scenario_preset():
     with shared["lock"]:
         _apply_preset(shared["params"], shared["params"]["scenario"])
         _invalidate_levels()
-        shared["state"]["cosim"] = None
-        shared["state"]["ap"] = None
         _touch()
         audit_log(session_user(), "PRESET SKENARIO", f"diterapkan ulang: {shared['params']['scenario']}")
 
@@ -2259,9 +1680,6 @@ def update_param(name, key):
             session_user(), "UBAH PARAMETER",
             f"{PARAM_LABELS.get(name, name)}: dari {old} menjadi {new}",
         )
-        if name in ("control_mode", "autopilot", "ap_wob_sp", "ap_rpm_sp",
-                    "shadow_wob_ceiling_kn", "shadow_ramp_pct"):
-            shared["state"]["cosim"] = None
         if name == "scenario":
             # Ganti skenario = mulai ulang simulasi dengan ambang/setpoint skenario itu.
             _apply_preset(shared["params"], new)
@@ -2333,8 +1751,6 @@ def reset_params_to_default():
     with shared["lock"]:
         shared["params"] = copy.deepcopy(DEFAULT_PARAMS)
         _invalidate_levels()
-        shared["state"]["ap"] = None
-        shared["state"]["cosim"] = None
         _touch()
         audit_log(session_user(), "RESET PARAMETER", "semua parameter dikembalikan ke default")
 
@@ -2420,42 +1836,6 @@ def _h(text):
 def notice(text, kind=""):
     return _h(f'<div class="notice {kind}">{text}</div>')
 
-
-
-
-def ui_section(title, subtitle="", tone="blue"):
-    """Tampilan heading SCADA; tidak melakukan perubahan state atau perhitungan."""
-    safe_title = html.escape(str(title))
-    safe_sub = html.escape(str(subtitle))
-    t = tone if tone in ("blue", "green", "red") else "blue"
-    subtitle_html = f'<div class="ui-section-sub">{safe_sub}</div>' if safe_sub else ""
-    return _h(f'<div class="ui-section tone-{t}"><div class="ui-section-title">'
-              f'{safe_title}</div>{subtitle_html}</div>')
-
-
-def ui_kpi(label, value, tone="blue", detail=""):
-    """Kartu visual saja. Seluruh nilai dibaca dari perhitungan yang sudah ada."""
-    allowed = {"blue", "green", "amber", "red", "magenta", "neutral"}
-    t = tone if tone in allowed else "neutral"
-    desc = (f'<div class="ui-kpi-desc">{html.escape(str(detail))}</div>'
-            if detail else "")
-    return (f'<div class="ui-kpi tone-{t}">'
-            f'<div class="ui-kpi-label">{html.escape(str(label))}</div>'
-            f'<div class="ui-kpi-value">{html.escape(str(value))}</div>{desc}</div>')
-
-
-def ui_kpi_grid(cards, columns=4):
-    n = columns if columns in (2, 3, 4) else 4
-    return _h(f'<div class="ui-kpi-grid cols-{n}">' + "".join(cards) + '</div>')
-
-
-def ui_channel(parameter, reading, level, bad=False):
-    css = "lverr" if bad else f"lv{min(max(int(level),0),3)}"
-    status = "INVALID" if bad else LEVELS[min(max(int(level),0),3)]["name"]
-    return (f'<div class="channel-card {css}"><div class="channel-name">'
-            f'{html.escape(str(parameter))}</div>'
-            f'<div class="channel-status">{html.escape(str(status))}</div>'
-            f'<div class="channel-reading">{html.escape(str(reading))}</div></div>')
 
 def html_table(rows, columns, chip_column=None):
     head = "".join(f"<th>{html.escape(c)}</th>" for c in columns)
@@ -2831,38 +2211,6 @@ def kpi_rows_from_hist(hist):
          "Auto pilot": f"{int(np.sum(series('brake') > 0.10))}"},
     ]
 
-
-@st.cache_data(show_spinner=False, max_entries=30)
-def render_comparison_png(cache_key, theme, ylabel, xlabel, _x, _raw, _shadow, _model, mode="SHADOW"):
-    pal = PALETTES.get(theme, PALETTES["light"])
-    fig = Figure(figsize=(10.2, 3.2), dpi=120, facecolor=pal["surface"])
-    ax = fig.add_subplot(111)
-    ax.set_facecolor(pal["surface"])
-    x = np.asarray(_x, dtype=float)
-    raw = np.asarray(_raw, dtype=float)
-    shadow = np.asarray(_shadow, dtype=float)
-    model = np.asarray(_model, dtype=float)
-    if len(x) and np.isfinite(raw).any():
-        ax.plot(x, raw, color=pal["muted"], linewidth=1.6, label="Data rig historis")
-    if len(x) and np.isfinite(shadow).any():
-        ax.plot(x, shadow, color=pal["accent"], linewidth=2.0,
-                label=("Setpoint WOB diterapkan" if "WOB" in ylabel else "ROP baseline tetap")
-                if mode=="COSIM" else "Rekomendasi Fuzzy SHADOW")
-    if len(x) and np.isfinite(model).any():
-        ax.plot(x, model, color=pal["lv1"], linewidth=1.8, linestyle="--",
-                label=("WOB respons model Fuzzy-PID" if "WOB" in ylabel
-                       else "ROP plant adaptif") if mode=="COSIM" else
-                       "Proyeksi Fuzzy-PID lama (terpisah)")
-    ax.set_ylabel(ylabel, color=pal["text"], fontsize=9)
-    ax.set_xlabel(xlabel, color=pal["text"], fontsize=9)
-    ax.grid(axis="y", color=pal["chart_grid"], alpha=.6)
-    ax.tick_params(colors=pal["muted"], labelsize=8)
-    for spine in ax.spines.values(): spine.set_color(pal["border"])
-    ax.legend(loc="upper left", fontsize=8, framealpha=0.92,
-              facecolor=pal["surface"], labelcolor=pal["text"])
-    fig.tight_layout()
-    return _fig_png(fig)
-
 # ==========================================================
 # HALAMAN
 # ==========================================================
@@ -2890,19 +2238,18 @@ with st.sidebar:
 st.markdown(_h(f"""
 <div class="ews-header">
   <div>
-    <div class="ews-title">PDSI | Adaptive Drilling Simulator</div>
-    <div class="ews-sub">Data NEAC-001 | Fuzzy Supervisor | EWS</div>
+    <div class="ews-title">EWS Telemetry Monitoring</div>
+    <div class="ews-sub">Early Warning System - Drilling Operations</div>
   </div>
   <div>
-    <span class="tag sim">Co-Simulation / Replay</span>
+    <span class="tag sim">Simulasi / playback</span>
     <span class="tag">{"Admin" if is_admin else "Viewer"}</span>
   </div>
 </div>"""), unsafe_allow_html=True)
 st.markdown(
     notice(
-        "<b>Prototipe simulasi Fuzzy-PID.</b> Mode Co-Simulation menggunakan plant "
-        "sensitivitas hipotetis, bukan hasil validasi rig/Amphion. "
-        "Data asli tidak diubah; ambang EWS adalah demonstrasi.",
+        "<b>Simulasi dan playback data.</b> Tidak terhubung ke rig atau Amphion PDSI. "
+        "Ambang hanya untuk pengujian perangkat lunak, bukan setpoint operasi.",
         "warn",
     ),
     unsafe_allow_html=True,
@@ -2972,14 +2319,11 @@ st.session_state["w_test_sensor"] = current["test_faulty_sensor"]
 st.session_state["w_wa_enabled"] = current["wa_enabled"]
 st.session_state["w_wa_min_level"] = current["wa_min_level"]
 st.session_state["w_autopilot"] = current["autopilot"]
-st.session_state["w_control_mode"] = current.get("control_mode", "Co-Simulation Fuzzy-PID")
 st.session_state["w_ap_wob"] = float(current["ap_wob_sp"])
 st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
 st.session_state["w_ap_rop"] = float(current["ap_rop_target"])
 st.session_state["w_ap_med"] = float(current["ap_rise_med_pct"])
 st.session_state["w_ap_high"] = float(current["ap_rise_high_pct"])
-st.session_state["w_shadow_ceiling"] = float(current.get("shadow_wob_ceiling_kn", 100.0))
-st.session_state["w_shadow_ramp"] = float(current.get("shadow_ramp_pct", 2.0))
 
 if current["scenario"] in (SCENARIOS[3], SCENARIOS[4]) and field_full is None:
     st.error(f"File data lapangan {FIELD_FILE} tidak ditemukan di folder aplikasi.")
@@ -3011,45 +2355,34 @@ with st.sidebar:
         on_change=update_param, args=("scenario", "w_scenario"),
     )
     st.selectbox(
-        "Mode penelitian", ["Co-Simulation Fuzzy-PID", "Replay + SHADOW"],
-        key="w_control_mode", disabled=locked,
-        on_change=update_param, args=("control_mode", "w_control_mode"),
-        help="Co-Simulation mengirim target Fuzzy ke Fuzzy-PID pada plant hipotetis. "
-             "SHADOW hanya mencatat rekomendasi terhadap replay.",
+        "Interval pembaruan", INTERVAL_OPTIONS, key="w_interval", disabled=locked,
+        format_func=lambda x: f"{x} detik",
+        on_change=update_param, args=("interval", "w_interval"),
     )
-    cols_play = st.columns(2)
-    call_wide(cols_play[0].button,"Jeda" if current["auto"] else "Lanjut",on_click=toggle_play,disabled=locked,key="nav_play")
-    call_wide(cols_play[1].button,"Reset",on_click=reset_simulation,disabled=locked,key="nav_reset")
-    with st.expander("Pengaturan playback dan alarm", expanded=False):
-        st.selectbox(
-            "Interval pembaruan", INTERVAL_OPTIONS, key="w_interval", disabled=locked,
-            format_func=lambda x: f"{x} detik",
-            on_change=update_param, args=("interval", "w_interval"),
-        )
-        st.selectbox(
-            "Baris per pembaruan", BATCH_OPTIONS, key="w_batch_size", disabled=locked,
-            on_change=update_param, args=("batch_size", "w_batch_size"),
-        )
-        st.toggle(
-            "Jalankan simulasi otomatis", key="w_auto", disabled=locked,
-            on_change=update_param, args=("auto", "w_auto"),
-        )
-        st.toggle(
-            "Mode auto pilot (Fuzzy-PID)", key="w_autopilot", disabled=locked,
-            on_change=update_param, args=("autopilot", "w_autopilot"),
-        )
-        st.toggle(
-            "Aktifkan alarm suara (semua device)", key="w_alarm_enabled", disabled=locked,
-            on_change=update_param, args=("alarm_enabled", "w_alarm_enabled"),
-        )
-        st.toggle(
-            "Ulangi alarm magenta", key="w_repeat_alarm", disabled=locked,
-            on_change=update_param, args=("repeat_alarm", "w_repeat_alarm"),
-        )
-        st.checkbox(
-            "Ulangi simulasi dari awal", key="w_loop_data", disabled=locked,
-            on_change=update_param, args=("loop_data", "w_loop_data"),
-        )
+    st.selectbox(
+        "Baris per pembaruan", BATCH_OPTIONS, key="w_batch_size", disabled=locked,
+        on_change=update_param, args=("batch_size", "w_batch_size"),
+    )
+    st.toggle(
+        "Jalankan simulasi otomatis", key="w_auto", disabled=locked,
+        on_change=update_param, args=("auto", "w_auto"),
+    )
+    st.toggle(
+        "Mode auto pilot (Fuzzy-PID)", key="w_autopilot", disabled=locked,
+        on_change=update_param, args=("autopilot", "w_autopilot"),
+    )
+    st.toggle(
+        "Aktifkan alarm suara (semua device)", key="w_alarm_enabled", disabled=locked,
+        on_change=update_param, args=("alarm_enabled", "w_alarm_enabled"),
+    )
+    st.toggle(
+        "Ulangi alarm magenta", key="w_repeat_alarm", disabled=locked,
+        on_change=update_param, args=("repeat_alarm", "w_repeat_alarm"),
+    )
+    st.checkbox(
+        "Ulangi simulasi dari awal", key="w_loop_data", disabled=locked,
+        on_change=update_param, args=("loop_data", "w_loop_data"),
+    )
 
     st.markdown(
         '<div class="side-title" style="margin-top:14px">Suara dan getar (perangkat ini)</div>',
@@ -3091,19 +2424,6 @@ with st.sidebar:
         inline_warning(
             current["ap_rise_med_pct"] >= current["ap_rise_high_pct"],
             "Kenaikan sedang harus lebih kecil dari kenaikan tinggi",
-        )
-        st.divider()
-        st.caption("Batas uji berlaku untuk setpoint Fuzzy (SHADOW atau Co-Simulation); "
-                   "bukan batas operasional rig.")
-        st.number_input(
-            "Batas WOB simulator (kN)", min_value=1.0, max_value=500.0,
-            step=1.0, key="w_shadow_ceiling", disabled=locked,
-            on_change=update_param, args=("shadow_wob_ceiling_kn", "w_shadow_ceiling"),
-        )
-        st.number_input(
-            "Maksimum perubahan target per sampel (%)", min_value=0.1,
-            max_value=10.0, step=0.5, key="w_shadow_ramp", disabled=locked,
-            on_change=update_param, args=("shadow_ramp_pct", "w_shadow_ramp"),
         )
 
     with st.expander("Ambang alarm (demonstrasi)"):
@@ -3150,8 +2470,7 @@ with st.sidebar:
             disabled=locked, format_func=lambda x: f"{x} pembacaan terakhir",
             on_change=update_param, args=("roc_window", "w_roc_window"),
         )
-        st.caption("Laju per menit hanya valid jika data memiliki timestamp akuisisi riil. "
-                   "Untuk NEAC-001 kedalaman, alarm laju dinonaktifkan secara otomatis.")
+        st.caption("Ambang laju = perubahan per MENIT (naik atau turun).")
         for parameter in PARAMETERS:
             st.markdown(f"**{DISPLAY_NAME.get(parameter, parameter)}** ({UNITS[parameter]}/mnt)")
             cols = st.columns(2)
@@ -3229,18 +2548,33 @@ with st.sidebar:
     call_wide(st.button, "Reset simulasi", disabled=locked, on_click=reset_simulation, key="btn_reset")
     call_wide(st.button, "Lompat ke data terakhir", disabled=locked, on_click=jump_to_last, key="btn_jump")
 
-# ---------------------------- TIGA DASHBOARD UTAMA ----------------------------
-# Hanya tiga pilihan. Detail teknis dipindah ke expander/tab internal.
+# ---------------------------- KERANGKA HALAMAN ----------------------------
+# Semua bagian dibuat SELALU dengan urutan tetap. Isinya boleh berubah tiap detik,
+# tetapi jumlah elemen tingkat atas tidak, sehingga grafik dan tabel tidak dibuat ulang.
 view = st.radio(
-    "Tiga dashboard", ["Kabin Driller", "Kontrol Adaptif (Fuzzy-PID)", "EWS & Evaluasi"],
-    horizontal=True, key="view_mode", label_visibility="collapsed",
+    "Tampilan", ["Kabin Driller", "Kabin Auto Pilot", "Dasbor EWS"], horizontal=True,
+    key="view_mode", label_visibility="collapsed",
 )
-view_cabin = view == "Kabin Driller"
-view_control = view == "Kontrol Adaptif (Fuzzy-PID)"
-view_ews = view == "EWS & Evaluasi"
+view_raw = view == "Kabin Driller"
+view_ap = view == "Kabin Auto Pilot"
+cabin_view = view != "Dasbor EWS"
 
-# Proses playback dan evaluasi alarm tetap memakai mesin lama.
+sec_status = st.container()
+sec_ack = st.container()
+sec_alerts = st.container()
+sec_cabin = st.container()
+sec_cards = st.container()
+sec_ap = st.container()
+sec_legend = st.container()
+sec_trend = st.container()
+sec_events = st.container()
+sec_audit = st.container()
+sec_notes = st.container()
+sec_players = st.container()
+
+# ---------------------------- PROSES SIMULASI ----------------------------
 simulation_data, snap = process_simulation(data, ap_data, field_data, field_full)
+
 params = snap["params"]
 THRESHOLDS = params["thresholds"]
 scenario = params["scenario"]
@@ -3251,364 +2585,797 @@ rates = snap["rates"]
 bad_sensors = snap["bad_sensors"]
 ap_view = snap["ap"]
 ap_on = snap["ap_on"]
+
 n = len(simulation_data)
 index = snap["index"]
 visible = simulation_data.iloc[:index + 1]
 latest = visible.iloc[-1]
-has_depth = ("Depth_m" in simulation_data.columns
-             and bool(np.isfinite(float(latest.get("Depth_m", np.nan)))))
+has_depth = "Depth_m" in simulation_data.columns and bool(np.isfinite(float(latest.get("Depth_m", np.nan))))
+info = LEVELS[level]
 
-# Satu sumber target per mode. Pada Co-Simulation, titik biru BENAR-BENAR
-# menjadi masukan Fuzzy-PID yang sedang disimulasikan; bukan angka SHADOW.
-co_active = bool(snap.get("co_active", False))
-if co_active:
-    shadow_hist = cosim_fuzzy_frame(ap_view["hist"])
-    shadow_current = shadow_hist.iloc[-1].to_dict()
-else:
-    shadow_current, shadow_hist = fuzzy_snapshot(
-        simulation_data, params, index, ews_level=level,
-        fault=bool(snap["stale"] or bad_sensors or snap["fault_keys"]),
-    )
-shadow_target = float(shadow_current["WOB_shadow_kN"])
-shadow_action = str(shadow_current["Keputusan_Fuzzy"])
-shadow_reason = str(shadow_current["Alasan_Fuzzy"])
-mode_label = "CO-SIMULATION (FUZZY-PID AKTIF)" if co_active else (
-    "CO-SIMULATION NONAKTIF" if params.get("control_mode")=="Co-Simulation Fuzzy-PID"
-    else "REPLAY + SHADOW")
+messages = {
+    0: "Semua sinyal berada di bawah ambang kuning.",
+    1: "Waspada: setidaknya satu sinyal mencapai ambang kuning.",
+    2: "Bahaya simulasi: setidaknya satu sinyal mencapai ambang merah.",
+    3: (
+        "Kritis simulasi: setidaknya satu sinyal mencapai ambang magenta. "
+        "Ini bukan perintah operasi rig nyata."
+    ),
+}
 
-# VISUAL SAJA: status EWS berwarna penuh seperti SCADA lama.
-# Nilai level/status tetap berasal dari mesin evaluasi yang sama.
-status_level = "lverr" if snap["stale"] or bad_sensors else f"lv{level}"
-status_text = ("DATA TIDAK VALID" if bad_sensors else
-               "DATA TERLAMBAT" if snap["stale"] else LEVELS[level]["name"])
-status_explain = ("Parameter perlu diperiksa" if bad_sensors else
-                  "Aliran playback terhenti di luar jeda" if snap["stale"] else
-                  "Status berdasarkan data playback, bukan keluaran Fuzzy-PID")
-mode_tag = mode_label
-status_depth = (f'{float(latest["Depth_m"]):,.2f} m TMD' if has_depth else 'Indeks playback')
-st.markdown(
-    _h(f'<div class="status-hero {status_level}">'
-       f'<div><div class="status-kicker-new">STATUS EWS SIMULASI</div>'
-       f'<div class="status-main-new">{html.escape(status_text)}</div>'
-       f'<div class="status-explain-new">{html.escape(status_explain)}</div></div>'
-       f'<div class="status-side-new"><span class="status-mode-new">{html.escape(mode_tag)}</span><br>'
-       f'Sampel {index+1:,}/{n:,} &nbsp;·&nbsp; {html.escape(status_depth)}</div>'
-       '</div>'),
-    unsafe_allow_html=True,
-)
-
-# ACK global tidak disembunyikan dari halaman mana pun.
-alarm_active = level > 0 or bool(snap["fault_keys"])
-if alarm_active and snap["ack_required"]:
-    ack_cols = st.columns([3, 1])
-    ack_cols[0].warning("Alarm membutuhkan ACK. Ini peringatan SIMULASI, bukan alarm rig nyata.")
-    call_wide(ack_cols[1].button, "ACK / Akui Alarm", key="btn_ack", type="primary",
-              on_click=ack_alarm, disabled=role not in ACK_ROLES)
-elif alarm_active and snap["ack"]:
-    st.caption("Alarm telah diakui oleh " + str(snap["ack"]["by"]) + ".")
-
-if snap["stale"] or bad_sensors:
-    st.error("Kualitas data tidak memenuhi syarat evaluasi otomatis. "
-             + ("Sensor tidak valid: " + ", ".join(bad_sensors) if bad_sensors else "Playback terlambat."))
-if snap["paused"]:
-    st.caption("Playback sedang dijeda.")
-if has_depth:
-    st.caption("NEAC-001: timestamp pada file aplikasi adalah waktu PLAYBACK buatan; "
-               "sumbu kedalaman digunakan untuk tren. Laju perubahan per menit bukan data waktu lapangan.")
-
-# ---------------------------- DASHBOARD 1: KABIN DRILLER ----------------------------
-if view_cabin:
-    st.markdown(ui_section("Kabin Driller", "Pemantauan parameter utama dan keputusan WOB adaptif", "green"),
-                unsafe_allow_html=True)
-    st.markdown(_h('<div class="ui-legend">'
-                '<span><i class="spot" style="background:var(--text)"></i>Jarum / angka: data rig</span>'
-                '<span><i class="spot" style="background:var(--accent)"></i>Titik biru WOB: '
-                + ("setpoint diterapkan" if co_active else
-                   "rekomendasi SHADOW" if params.get("control_mode") == "Replay + SHADOW"
-                   else "tidak aktif") + '</span>'
-                '<span><i class="spot" style="background:var(--lv1)"></i>Respons model di Kontrol Adaptif</span>'
-                '</div>'), unsafe_allow_html=True)
-
-    # Empat kartu ringkas, bukan lima kartu data ditambah sepuluh lampu.
-    if has_depth:
-        d0 = float(simulation_data["Depth_m"].iloc[0])
-        d1 = float(simulation_data["Depth_m"].iloc[-1])
-        pct = 100 * (float(latest["Depth_m"]) - d0) / max(d1 - d0, 1e-6)
-    else:
-        pct = None
-    stats = [
-        stat_html("Kedalaman TMD", _num(latest.get("Depth_m"), 2), "m", pct),
-        stat_html("Hook Load", _num(latest.get("WOH"), 1), "kN"),
-        stat_html("RPM total", _num(latest.get("RPM_total"), 1), "rpm"),
-        stat_html("Sampel", f"{index+1:,} / {n:,}", "", (index+1)/n*100),
-    ]
-    st.markdown(_h('<div class="cabin-bar">' + ''.join(stats) + '</div>'),
-                unsafe_allow_html=True)
-
-    gauges = []
-    for p in ("WOB", "ROP", "RPM"):
-        invalid = p in bad_sensors
-        # Tidak ada "laju per menit" pada depth-indexed NEAC-001.
-        rate_note = ("Data rig / replay" if has_depth else
-                     f"Laju {rates[p]:+.1f}/menit" if p in rates else "Data playback")
-        gauges.append(gauge_html(
-            p, None if invalid else float(latest[p]), THRESHOLDS[p],
-            signal_levels.get(p, 0), invalid, rate_note,
-            ap_value=shadow_target if (p == "WOB" and
-                                     (co_active or params.get("control_mode") == "Replay + SHADOW")) else None,
-        ))
-    st.markdown(_h('<div class="cabin-gauges">' + ''.join(gauges) + '</div>'),
-                unsafe_allow_html=True)
-    # Hanya presentasi: Torque dan SPP memakai kartu berwarna, status EWS tetap sama.
-    support_cards = []
-    for parameter in ("Torque", "StandpipePressure"):
-        name = "TORQUE" if parameter == "Torque" else "SPP"
-        invalid = parameter in bad_sensors
-        lv = signal_levels.get(parameter, 0)
-        tone = "neutral" if invalid else ("green", "amber", "red", "magenta")[min(max(lv, 0), 3)]
-        val = (f"{float(latest[parameter]):,.2f} {UNITS[parameter]}"
-               if not invalid else "DATA TIDAK VALID")
-        desc = "DATA TIDAK VALID" if invalid else "EWS " + LEVELS[lv]["name"]
-        support_cards.append(ui_kpi(name, val, tone, desc))
-    st.markdown(ui_kpi_grid(support_cards, 2), unsafe_allow_html=True)
-
-    action_display = "NAIKKAN" if shadow_action == "NAIKKAN" else (
-        "TURUNKAN" if shadow_action.startswith("TURUNKAN") else "TAHAN"
-    )
-    ref_wob = float(shadow_current["WOB_acuan_kN"])
-    delta = shadow_target - ref_wob
-    # Tampilkan alasan terstruktur satu kali; hindari tiga paragraf duplikat.
-    st.markdown(_h(f'''
-    <div class="decision-panel action-{'up' if action_display == 'NAIKKAN' else 'down' if action_display == 'TURUNKAN' else 'hold'}">
-      <div class="decision-label">Keputusan Fuzzy Supervisor | {"DIPAKAI Fuzzy-PID" if co_active else "SHADOW"}</div>
-      <div class="decision-grid">
-        <div><div class="decision-label">{"Setpoint dipakai" if co_active else "Rekomendasi WOB"}</div><div class="decision-value">{shadow_target:.2f} kN</div></div>
-        <div><div class="decision-label">Arah target</div><div class="decision-value">{html.escape(action_display)}</div></div>
-        <div><div class="decision-label">{"Δ target per langkah" if co_active else "Δ dari acuan lokal"}</div><div class="decision-value">{delta:+.2f} kN</div></div>
-      </div>
-      <div class="decision-reason"><b>Alasan:</b> {html.escape(shadow_reason)}</div>
-    </div>'''), unsafe_allow_html=True)
-    st.caption("Logika adaptif memakai rasio efisiensi ROP, Torque/WOB, SPP, "
-               "dan kestabilan WOB/RPM. " +
-               ("Feedback berasal dari langkah MODEL sebelumnya; target WOB dikirim ke Fuzzy-PID "
-                "dan responsnya dipisahkan dari data rig asli." if co_active else
-                "Rekomendasi masih SHADOW; tidak diterapkan pada pengendali."))
-    if co_active:
-        simh=ap_view["hist"]
-        risk_level = int(simh["model_ews_level"][-1])
-        risk_tone = ("green", "amber", "red", "magenta")[min(max(risk_level, 0), 3)]
-        st.markdown(ui_kpi_grid([
-            ui_kpi("WOB respons model", f"{simh['ap_WOB'][-1]:.2f} kN", "amber", "Keluaran Fuzzy-PID"),
-            ui_kpi("ROP model (hipotetis)", f"{simh['ap_ROP'][-1]:.2f} m/h", "blue", "Plant simulasi"),
-            ui_kpi("Risiko model (indikatif)", LEVELS[risk_level]["name"], risk_tone,
-                   "Berbeda dari EWS data rig"),
-        ], 3), unsafe_allow_html=True)
-
-    controls = st.columns([1, 1, 1])
-    call_wide(controls[0].button,
-              "Jeda" if params["auto"] else "Lanjut", key="cab_play",
-              on_click=toggle_play, disabled=locked)
-    call_wide(controls[1].button,
-              "Matikan Fuzzy-PID" if ap_on else "Aktifkan Fuzzy-PID",
-              key="cab_ap", on_click=toggle_autopilot, disabled=locked)
-    call_wide(controls[2].button, "Reset Playback", key="cab_reset",
-              on_click=reset_simulation, disabled=locked)
-
-    with st.expander("Detail instrumen dan indikator tambahan", expanded=False):
-        st.caption("Detail ini disembunyikan selama presentasi agar instrumen utama tetap terlihat.")
-        rows = []
-        for p in PARAMETERS:
-            lv = signal_levels.get(p, 0)
-            rows.append({"Parameter": DISPLAY_NAME.get(p, p),
-                         "Nilai playback": f"{_num(latest[p],DECIMALS[p])} {UNITS[p]}",
-                         "Status": "INVALID" if p in bad_sensors else LEVELS[lv]["name"]})
-        call_wide(st.dataframe, pd.DataFrame(rows), hide_index=True)
-        if ap_view:
-            st.caption("Fuzzy-PID aktif: output model tersedia pada dashboard Kontrol Adaptif. "
-                       "Saat ini proyeksi model BELUM melacak WOB SHADOW.")
-
-# ------------------------- DASHBOARD 2: KONTROL -------------------------
-elif view_control:
-    st.markdown(ui_section("Kontrol Adaptif (Fuzzy-PID)",
-                           "Target, respons model, dan alasan keputusan supervisor", "blue"),
-                unsafe_allow_html=True)
-    # Perubahan visual saja: keempat metric memakai kartu kontras yang tidak memotong label.
-    direction_tone = ("green" if shadow_action == "NAIKKAN" else
-                      "red" if shadow_action.startswith("TURUNKAN") else "blue")
-    st.markdown(ui_kpi_grid([
-        ui_kpi("WOB target " + ("DITERAPKAN" if co_active else "SHADOW"),
-               f"{shadow_target:.2f} kN", "blue", "Setpoint supervisor"),
-        ui_kpi("WOB data rig", f"{float(latest['WOB']):.2f} kN", "neutral", "Playback asli"),
-        ui_kpi("Keputusan Fuzzy", shadow_action, direction_tone, "Arah koreksi target"),
-        ui_kpi("Status Fuzzy-PID", "CLOSED-LOOP" if co_active else
-               "PROYEKSI" if ap_on and ap_view else "NONAKTIF",
-               "green" if co_active else "amber" if ap_on and ap_view else "neutral",
-               "Mode pengujian model"),
-    ]), unsafe_allow_html=True)
-    st.markdown(_h('<div class="ui-reason"><b>ALASAN KEPUTUSAN · </b>'
-                   + html.escape(str(shadow_reason)) + '</div>'), unsafe_allow_html=True)
-    st.caption("Aturan Fuzzy: " + str(shadow_current.get("Aksi_Aturan_Fuzzy", "TAHAN"))
-               + "; arah target: " + shadow_action + ". "
-               + ("Pada Co-Simulation, hanya keputusan Fuzzy dan pembatas risiko yang mengubah target."
-                  if co_active else "Mode SHADOW dapat menyesuaikan target menuju median WOB lokal."))
-    st.markdown("**Grafik WOB: data rig, target Fuzzy, dan respons Fuzzy-PID**" if co_active
-                else "**Grafik WOB: data rig, rekomendasi, dan proyeksi model**")
-    st.caption("Setpoint biru " + ("masuk ke PID, kuning adalah WOB respons model."
-                 if co_active else "masih SHADOW dan terpisah dari proyeksi PID lama."))
-    indices = np.arange(max(0, index - 119), index + 1, dtype=int)
-    x = (simulation_data["Depth_m"].iloc[indices].to_numpy(dtype=float)
-         if has_depth else (indices+1).astype(float))
-    wob_raw = simulation_data["WOB"].iloc[indices].to_numpy(dtype=float)
-    wob_shadow = shadow_hist["WOB_shadow_kN"].iloc[indices].to_numpy(dtype=float)
-    wob_model = np.full(len(indices), np.nan)
-    if ap_view:
-        aph = ap_view["hist"]
-        lookup = {int(i): float(v) for i, v in zip(aph["idx"], aph["ap_WOB"])}
-        wob_model = np.array([lookup.get(int(i), np.nan) for i in indices], dtype=float)
-    png = render_comparison_png(
-        ("wob", int(index), scenario, n, bool(ap_view), round(shadow_target,4),
-         float(params["ap_wob_sp"]), float(params.get("shadow_wob_ceiling_kn",100.)),
-         float(params.get("shadow_ramp_pct",2.)),
-         int(ap_view["uid"]) if ap_view else -1,
-         len(ap_view["hist"]["idx"]) if ap_view else 0),
-        THEME_NAME, "WOB (kN)", "Kedalaman TMD (m)" if has_depth else "Sampel",
-        x, wob_raw, wob_shadow, wob_model,
-        mode="COSIM" if co_active else "SHADOW",
-    )
-    show_image(st, png)
-    if ap_view:
-        st.markdown("**Grafik ROP: data rig vs keluaran plant simulasi**")
-        aph = ap_view["hist"]
-        lookup_rop = {int(i): float(v) for i, v in zip(aph["idx"], aph["ap_ROP"])}
-        rop_model = np.array([lookup_rop.get(int(i), np.nan) for i in indices], dtype=float)
-        rop_raw = simulation_data["ROP"].iloc[indices].to_numpy(dtype=float)
-        png_rop = render_comparison_png(
-            ("rop", int(index), scenario, n, int(ap_view["uid"]), len(aph["idx"])),
-            THEME_NAME, "ROP (m/h)", "Kedalaman TMD (m)" if has_depth else "Sampel",
-            x, rop_raw,
-            np.array([{int(i):float(v) for i,v in zip(aph["idx"],aph["ROP_fixed"])}.get(int(i),np.nan)
-                      for i in indices],dtype=float) if co_active else np.full(len(indices), np.nan),
-            rop_model, mode="COSIM" if co_active else "SHADOW",
+# ---------------------------- STATUS ----------------------------
+with sec_status:
+    if snap["stale"]:
+        panel_class = "lverr"
+        panel_label = "DATA TERLAMBAT"
+        panel_message = (
+            f"Tidak ada data baru selama {snap['stale_age']:.0f} detik "
+            f"(batas {snap['stale_limit']:.0f} detik). "
+            "Status EWS tidak dapat dipercaya."
         )
-        show_image(st, png_rop)
     else:
-        st.caption("Aktifkan Fuzzy-PID untuk menjalankan model simulasi.")
+        panel_class = f"lv{level}"
+        panel_label = info["name"]
+        panel_message = messages[level]
 
-    with st.expander("Detail Fuzzy-PID: gain, pengereman, dan riwayat", expanded=False):
-        if ap_view:
-            if not co_active:
-                st.metric("Pengereman putaran", f"{100*float(ap_view['brake']):.1f}%")
-            gain_rows = [{"Kanal": DISPLAY_NAME.get(p,p),
-                          "Kp": f"{ap_view['gains'][p][0]:.4f}",
-                          "Ki": f"{ap_view['gains'][p][1]:.4f}",
-                          "Kd": f"{ap_view['gains'][p][2]:.4f}"}
-                         for p in (["WOB", "RPM"] if co_active else AP_CHANNEL_LIST)]
-            call_wide(st.dataframe, pd.DataFrame(gain_rows), hide_index=True)
-            hs = ap_view["hist"]
-            frame_hist = pd.DataFrame({k:v for k,v in hs.items() if k != "t"})
-            frame_hist.insert(0, "timestamp_playback", [str(v) for v in hs["t"]])
-            st.download_button("Unduh riwayat Fuzzy-PID CSV",
-                               frame_hist.to_csv(index=False).encode("utf-8-sig"),
-                               "proyeksi_fuzzy_pid.csv", "text/csv",key="ctrl_csv")
-        else:
-            st.caption("Fuzzy-PID sedang dinonaktifkan.")
-    with st.expander("Aturan Supervisor Fuzzy (ringkas)", expanded=False):
-        st.markdown("""**NAIKKAN:** efisiensi penetrasi menurun, WOB/RPM relatif stabil, risiko Torque/SPP rendah.  
-**TURUNKAN:** kenaikan Torque/WOB atau SPP menunjukkan peningkatan indikator risiko.  
-**TAHAN:** sinyal belum cukup, data tidak stabil, atau keputusan tidak kuat.  
-Keluaran merupakan **rekomendasi uji**, bukan estimasi kekerasan batuan atau setpoint rig nyata.""")
-        call_wide(st.dataframe, shadow_hist.tail(15), hide_index=True)
+    sample_time = latest["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
+    depth_text = f"<span>Kedalaman: {_num(latest.get('Depth_m'), 2)} m</span>" if has_depth else ""
+    progress_pct = (index + 1) / n * 100
+    st.markdown(_h(f"""
+    <div class="status-panel {panel_class}">
+      <div class="status-kicker">Status EWS simulasi</div>
+      <div class="status-title">{panel_label}</div>
+      <div class="status-msg">{html.escape(panel_message)}</div>
+      <div class="status-meta">
+        {depth_text}
+        <span>Sampel: {sample_time}</span>
+        <span>Mode: {html.escape(scenario)}</span>
+        <span>Data: {index + 1} / {n}</span>
+      </div>
+      <div class="status-progress"><div style="width:{progress_pct:.1f}%"></div></div>
+    </div>"""), unsafe_allow_html=True)
 
-# ---------------------- DASHBOARD 3: EWS + EVALUASI ----------------------
-else:
-    st.markdown(ui_section("EWS & Evaluasi", "Status kanal, riwayat alarm, dan hasil uji simulator", "red"),
-                unsafe_allow_html=True)
-    tabs=st.tabs(["Monitoring EWS", "Hasil Penelitian"])
-    with tabs[0]:
-        st.markdown("**Status kanal pemantauan**")
-        channel_cards = []
-        for p in PARAMETERS:
-            lv = signal_levels.get(p, 0)
-            channel_cards.append(ui_channel(
-                SHORT_NAME[p], f"{_num(latest[p], DECIMALS[p])} {UNITS[p]}",
-                lv, p in bad_sensors))
-        st.markdown(_h('<div class="channel-grid">' + ''.join(channel_cards) + '</div>'),
-                    unsafe_allow_html=True)
+# ---------------------------- ACK ----------------------------
+alarm_active = level > 0 or bool(snap["fault_keys"])
+with sec_ack:
+    if alarm_active:
+        if snap["ack_required"]:
+            st.markdown(
+                _h('<div class="ack-banner ack-pending">ALARM BELUM DIAKUI. Tekan ACK untuk '
+                   "menghentikan bunyi dan getar di semua perangkat.</div>"),
+                unsafe_allow_html=True,
+            )
+            call_wide(
+                st.button, "ACK / AKUI ALARM", key="btn_ack", type="primary",
+                on_click=ack_alarm, disabled=role not in ACK_ROLES,
+            )
+            if role not in ACK_ROLES:
+                st.caption("Peran Anda tidak diizinkan melakukan ACK.")
+        elif snap["ack"]:
+            ack_info = snap["ack"]
+            ack_time = datetime.fromtimestamp(ack_info["time"], WIB).strftime("%H:%M:%S")
+            st.markdown(
+                _h(f'<div class="ack-banner ack-done">Alarm diakui oleh '
+                   f"<b>{html.escape(str(ack_info['by']))}</b> pukul {ack_time} WIB</div>"),
+                unsafe_allow_html=True,
+            )
+
+# ---------------------------- PERINGATAN DATA ----------------------------
+with sec_alerts:
+    slot_field = st.empty()
+    slot_sensor = st.empty()
+    slot_paused = st.empty()
+    slot_missing = st.empty()
+    if scenario in (SCENARIOS[3], SCENARIOS[4]) and field_full is not None:
+        d_first = _num(simulation_data["Depth_m"].iloc[0], 1)
+        d_last = _num(simulation_data["Depth_m"].iloc[-1], 1)
+        subset_text = (
+            f"dipangkas dari 1815 baris asli sampai {FIELD_MAX_DEPTH_M:.0f} m"
+            if scenario == SCENARIOS[3]
+            else "seluruh data dari 1815 baris asli; 1 baris dibuang karena ROP inverse bernilai 0. "
+                 "Gunakan 'Baris per pembaruan' 10 sampai 50 agar playback tidak terlalu lama"
+        )
+        slot_field.markdown(
+            notice(
+                f"<b>Data lapangan NEAC-001:</b> {n} baris, kedalaman {d_first} sampai {d_last} m "
+                f"({subset_text}). Satuan dikonversi: "
+                "klbf ke kN, lbf.ft ke kN.m, min/m ke m/h. Timestamp adalah indeks playback sintetis "
+                "(1 menit per baris), bukan waktu akuisisi lapangan.",
+            ),
+            unsafe_allow_html=True,
+        )
+    if bad_sensors:
+        slot_sensor.markdown(
+            notice(
+                "<b>Sensor tidak valid:</b> " + html.escape(", ".join(bad_sensors))
+                + ". Nilai kosong atau di luar rentang; sensor ini tidak ikut dievaluasi.",
+                "err",
+            ),
+            unsafe_allow_html=True,
+        )
+    if snap["paused"]:
+        slot_paused.markdown(
+            notice("Simulasi sedang dijeda. Data tidak diperbarui."),
+            unsafe_allow_html=True,
+        )
+    if scenario == SCENARIOS[2] and ap_data is None:
+        slot_missing.markdown(
+            notice(f"File <b>{AUTOPILOT_FILE}</b> tidak ditemukan di repo; dashboard memakai dataset lama.", "err"),
+            unsafe_allow_html=True,
+        )
+
+# ==========================================================
+# TAMPILAN KABIN DRILLER
+# ==========================================================
+if view_raw:
+    ap_last = None
+    if ap_view:
+        hist_c = ap_view["hist"]
+        ap_last = {name: hist_c[f"ap_{name}"][-1] for name in AP_CHANNEL_LIST}
+
+    with sec_cabin:
+        slot_stats = st.empty()
+        slot_gauges = st.empty()
+        slot_lamps = st.empty()
+        controls = st.container()
+        slot_ap = st.empty()
+        slot_strips = st.empty()
+
+        # --- bilah status: kedalaman, hook load, RPM total, posisi data ---
         if has_depth:
-            st.caption("EWS absolut menggunakan ambang demonstrasi. Alarm laju perubahan per MENIT "
-                       "dinonaktifkan karena timestamp NEAC-001 bukan waktu akuisisi.")
-        st.markdown("**Riwayat alarm dan ACK**")
-        if events_list:
-            call_wide(st.dataframe, pd.DataFrame(events_list[:100]), hide_index=True)
-            st.download_button("Unduh riwayat EWS CSV",
-                               pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
-                               "riwayat_ews.csv", "text/csv",key="ews_csv")
+            d_start = float(simulation_data["Depth_m"].iloc[0])
+            d_end = float(simulation_data["Depth_m"].iloc[-1])
+            d_now = float(latest["Depth_m"])
+            depth_progress = (d_now - d_start) / max(d_end - d_start, 1e-9) * 100.0
         else:
-            st.info("Belum ada kejadian eskalasi EWS pada playback ini.")
-        with st.expander("Grafik tren parameter", expanded=False):
-            selected = st.multiselect("Pilih grafik", PARAMETERS,
-                                      default=["ROP", "Torque"],
-                                      format_func=lambda p:DISPLAY_NAME.get(p,p),
-                                      key="trend_selected")
-            plots=st.columns(2)
-            plot_data=visible.tail(120)
-            use_depth=has_depth and bool(plot_data["Depth_m"].notna().all())
-            x_vals=plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
-            x_name="Kedalaman TMD (m)" if use_depth else "Waktu playback"
-            for j,p in enumerate(selected):
-                image_bytes=render_trend_png(
-                    (p,int(index),scenario,len(plot_data),x_name),THEME_NAME,
-                    p,THRESHOLDS[p],x_name,x_vals,plot_data[p])
-                show_image(plots[j%2],image_bytes)
-        with st.expander("Log audit admin dan catatan keselamatan",expanded=False):
-            st.write("Data dan ambang hanya untuk pengujian perangkat lunak. "
-                     "Tidak mengidentifikasi kick, sticking, atau NPT aktual tanpa label referensi.")
-            if is_admin:
-                with shared["lock"]:
-                    audit_rows=list(shared["audit"])
-                if audit_rows:
-                    call_wide(st.dataframe,pd.DataFrame(audit_rows[:200]),hide_index=True)
-                    st.download_button("Unduh log audit CSV",
-                                       pd.DataFrame(audit_rows).to_csv(index=False).encode("utf-8-sig"),
-                                       "log_audit_ews.csv","text/csv",key="audit_csv")
-    with tabs[1]:
-        st.markdown("**Hasil perhitungan Fuzzy " + ("Co-Simulation" if co_active else "SHADOW") + "**")
-        directions = shadow_hist["Keputusan_Fuzzy"].value_counts()
-        st.markdown(ui_kpi_grid([
-            ui_kpi("Setpoint naik", int(directions.get("NAIKKAN", 0)), "green", "Keputusan simulasi"),
-            ui_kpi("Setpoint tahan", int(directions.get("TAHAN", 0)), "blue", "Keputusan simulasi"),
-            ui_kpi("Setpoint turun", int(directions.get("TURUNKAN", 0)), "red", "Keputusan simulasi"),
-        ], 3), unsafe_allow_html=True)
-        st.caption("Keputusan per sampel simulasi, BUKAN tindakan rig atau NPT aktual.")
-        if co_active:
-            st.markdown("**Perbandingan pada plant HIPOTETIS yang sama**")
-            call_wide(st.dataframe, cosim_summary(ap_view["hist"],params),hide_index=True)
-            st.caption("Nilai ROP model dihitung dari gangguan replay dan asumsi elastisitas WOB/RPM. "
-                       "Ini BUKAN validasi efek kendali pada rig ataupun bukti pengurangan NPT.")
-            log=pd.DataFrame({k:v for k,v in ap_view["hist"].items() if k!="t"})
-            log.insert(0,"timestamp_playback_buatan",[str(x) for x in ap_view["hist"]["t"]])
-            st.download_button("Unduh hasil Co-Simulation + pembanding CSV",
-                               log.to_csv(index=False).encode("utf-8-sig"),
-                               "hasil_cosimulation_fuzzy_pid.csv","text/csv",key="results_cosim_csv")
+            depth_progress = None
+        stats = [
+            stat_html("Kedalaman TMD", _num(latest.get("Depth_m"), 2), "m", depth_progress),
+            stat_html("Kedalaman TVD", _num(latest.get("TVD_m"), 2), "m"),
+            stat_html("Hook load (WOH)", _num(latest.get("WOH"), 1), "kN"),
+            stat_html("RPM total", _num(latest.get("RPM_total"), 1), "rpm"),
+            stat_html("Data diputar", f"{index + 1} / {n}", "", (index + 1) / n * 100.0),
+        ]
+        slot_stats.markdown(_h('<div class="cabin-bar">' + "".join(stats) + "</div>"), unsafe_allow_html=True)
+
+        # --- gauge utama ---
+        gauges = []
+        for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
+            bad = parameter in bad_sensors
+            rate_text = f"Laju {rates[parameter]:+.1f} per menit" if parameter in rates else "&nbsp;"
+            gauges.append(
+                gauge_html(
+                    parameter,
+                    None if bad else float(latest[parameter]),
+                    THRESHOLDS[parameter],
+                    signal_levels.get(parameter, 0),
+                    bad,
+                    rate_text,
+                    ap_last[parameter] if (ap_last and ap_on) else None,
+                )
+            )
+        slot_gauges.markdown(_h('<div class="cabin-gauges">' + "".join(gauges) + "</div>"), unsafe_allow_html=True)
+
+        # --- annunciator ---
+        brake_now = float(ap_view["brake"]) if ap_view else 0.0
+        brake_css, brake_text = brake_style(brake_now)
+        lamps = []
+        for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
+            if parameter in bad_sensors:
+                lamps.append(lamp_html(SHORT_NAME[parameter], "on lverr", "Sensor"))
+            else:
+                lv = signal_levels.get(parameter, 0)
+                lamps.append(
+                    lamp_html(SHORT_NAME[parameter], f"on lv{lv}", LEVELS[lv]["name"]) if lv > 0
+                    else lamp_html(SHORT_NAME[parameter], "ok", "Normal")
+                )
+        roc_level = max((v for k, v in signal_levels.items() if k.endswith(ROC_SUFFIX)), default=0)
+        lamps.append(
+            lamp_html("Laju", f"on lv{roc_level}", LEVELS[roc_level]["name"]) if roc_level > 0
+            else lamp_html("Laju", "ok", "Normal")
+        )
+        data_fault = snap["stale"] or bool(bad_sensors)
+        lamps.append(
+            lamp_html("Data", "on lverr", "Terlambat" if snap["stale"] else "Sensor") if data_fault
+            else lamp_html("Data", "ok", "Normal")
+        )
+        lamps.append(lamp_html("Auto pilot", "ok" if ap_on else "idle", "Aktif" if ap_on else "Nonaktif"))
+        lamps.append(
+            lamp_html("Rem putaran", f"on {brake_css}", f"{brake_now * 100:.0f}%") if brake_now >= 0.10
+            else lamp_html("Rem putaran", "ok" if ap_on else "idle", "Tidak aktif")
+        )
+        lamps.append(
+            lamp_html("ACK", "on lv2", "Belum diakui", blink=True) if snap["ack_required"]
+            else lamp_html("ACK", "ok", "Aman")
+        )
+        slot_lamps.markdown(_h('<div class="annun">' + "".join(lamps) + "</div>"), unsafe_allow_html=True)
+
+        # --- tombol kendali kabin (admin) ---
+        with controls:
+            cols = st.columns(3)
+            call_wide(
+                cols[0].button,
+                "Jeda simulasi" if params["auto"] else "Lanjutkan simulasi",
+                key="cab_play", disabled=locked, on_click=toggle_play,
+            )
+            call_wide(
+                cols[1].button,
+                "Matikan auto pilot" if ap_on else "Aktifkan auto pilot",
+                key="cab_ap", disabled=locked, on_click=toggle_autopilot,
+            )
+            call_wide(
+                cols[2].button, "Reset simulasi",
+                key="cab_reset", disabled=locked, on_click=reset_simulation,
+            )
+
+        # --- panel auto pilot ---
+        if ap_view:
+            hist = ap_view["hist"]
+            recent = slice(-30, None)
+            rop_ap = float(np.mean(np.array(hist["ap_ROP"], dtype=float)[recent]))
+            rop_raw = float(np.mean(np.array(hist["raw_ROP"], dtype=float)[recent]))
+            rop_gain = (rop_ap / rop_raw - 1.0) * 100.0 if rop_raw > 0 else 0.0
+            boost = float(ap_view["boost"])
+            cards_c = [
+                ap_card_html("Perintah WOB", _num(hist["wob_cmd"][-1], 1), "kN",
+                             "lv1" if boost >= 0.01 else "lv0",
+                             f"Booster +{boost * 100:.0f}%" if boost >= 0.01 else "Stabil"),
+                ap_card_html("Perintah RPM", _num(hist["rpm_cmd"][-1], 1), "rpm",
+                             brake_css, "Direm" if brake_now >= 0.10 else "Normal"),
+                ap_card_html("Pengereman", f"{brake_now * 100:.0f}", "%", brake_css, brake_text),
+                ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
+                             "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
+            ]
+            extra = ""
+            if brake_now >= 0.10:
+                extra = notice(
+                    f"<b>Pengereman putaran aktif ({brake_now * 100:.0f}%).</b> Torsi "
+                    f"{ap_view['rise_t']:+.0f}% dan tekanan {ap_view['rise_p']:+.0f}% terhadap baseline. "
+                    "RPM dan WOB diturunkan otomatis.",
+                    "err" if brake_now >= 0.40 else "warn",
+                )
+            slot_ap.markdown(
+                _h('<div class="section-title">Auto pilot Fuzzy-PID</div><div class="ap-panel">'
+                   + "".join(cards_c) + "</div>" + extra),
+                unsafe_allow_html=True,
+            )
         else:
-            st.caption("Mode SHADOW hanya menghitung rekomendasi; tidak membuktikan hasil kendali.")
-            st.download_button("Unduh rekomendasi Fuzzy SHADOW CSV",
-                               shadow_hist.to_csv(index=False).encode("utf-8-sig"),
-                               "hasil_fuzzy_supervisor_shadow.csv","text/csv",key="results_shadow_csv")
-        with st.expander("Riwayat keputusan lengkap",expanded=False):
-            call_wide(st.dataframe,shadow_hist.tail(25),hide_index=True)
-        st.download_button("Unduh data replay terpilih CSV",
-                           visible.to_csv(index=False).encode("utf-8-sig"),
-                           "neac001_replay_terpilih.csv","text/csv",key="results_raw_csv")
-        st.info("Batas ilmiah: ini penelitian SIMULASI OFFLINE dengan plant sementara. "
-                "Tidak ada koneksi Amphion/PDSI, identifikasi litologi/UCS, "
-                "pengukuran NPT, atau model Bingham pada versi ini.")
+            slot_ap.markdown(
+                _h('<div class="section-title">Auto pilot Fuzzy-PID</div>')
+                + notice("Mode auto pilot nonaktif. Admin dapat mengaktifkannya dengan tombol di atas atau di sidebar."),
+                unsafe_allow_html=True,
+            )
 
-# Perintah bunyi/getar/ACK tetap aktif pada ketiga dashboard.
-if snap["ack_required"] and snap["alarm"] and snap["alarm_fresh"]:
-    components.html(alarm_player_html(snap["alarm"]),height=0)
-if snap["ack"] and snap["ack_fresh"]:
-    components.html(ack_stop_html(snap["ack"]),height=0)
+        # --- grafik mini tren (SVG) ---
+        tail = visible.tail(STRIP_POINTS)
+        ap_lookup = {}
+        if ap_view:
+            positions = ap_view["hist"]["idx"]
+            for name in AP_CHANNEL_LIST:
+                ap_lookup[name] = dict(zip(positions, ap_view["hist"][f"ap_{name}"]))
+        strips = []
+        for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
+            ap_series = None
+            if ap_lookup:
+                ap_series = [ap_lookup[parameter].get(i, np.nan) for i in tail.index]
+            strips.append(
+                strip_html(
+                    parameter, tail[parameter].to_numpy(), ap_series, THRESHOLDS[parameter],
+                    f"lv{signal_levels.get(parameter, 0)}",
+                )
+            )
+        legend_line = (
+            '<div class="legend-line">'
+            '<span><i style="background:var(--muted)"></i>Data mentah rig</span>'
+            '<span><i style="background:var(--accent)"></i>Hasil auto pilot</span>'
+            '<span><i style="background:var(--lv1)"></i>Ambang kuning</span>'
+            '<span><i style="background:var(--lv2)"></i>Ambang merah</span>'
+            '<span><i style="background:var(--lv3)"></i>Ambang magenta</span></div>'
+        )
+        slot_strips.markdown(
+            _h('<div class="section-title">Tren terbaru</div>' + legend_line
+               + '<div class="strip-grid">' + "".join(strips) + "</div>"),
+            unsafe_allow_html=True,
+        )
 
-# Catat lama proses untuk menyesuaikan interval refresh antarsesi.
+
+# ==========================================================
+# TAMPILAN KABIN AUTO PILOT (semua nilai mengikuti hasil perhitungan Fuzzy-PID)
+# ==========================================================
+if view_ap:
+    with sec_cabin:
+        slot_stats = st.empty()
+        slot_gauges = st.empty()
+        slot_lamps = st.empty()
+        controls = st.container()
+        slot_cmd = st.empty()
+        slot_strips = st.empty()
+        slot_cmp = st.empty()
+
+        if has_depth:
+            d_start = float(simulation_data["Depth_m"].iloc[0])
+            d_end = float(simulation_data["Depth_m"].iloc[-1])
+            depth_progress = (float(latest["Depth_m"]) - d_start) / max(d_end - d_start, 1e-9) * 100.0
+        else:
+            depth_progress = None
+        stats = [
+            stat_html("Kedalaman TMD", _num(latest.get("Depth_m"), 2), "m", depth_progress),
+            stat_html("Kedalaman TVD", _num(latest.get("TVD_m"), 2), "m"),
+            stat_html("Hook load (WOH)", _num(latest.get("WOH"), 1), "kN"),
+            stat_html("Auto pilot", "AKTIF" if ap_on else "NONAKTIF"),
+            stat_html("Data diputar", f"{index + 1} / {n}", "", (index + 1) / n * 100.0),
+        ]
+        slot_stats.markdown(_h('<div class="cabin-bar">' + "".join(stats) + "</div>"), unsafe_allow_html=True)
+
+        with controls:
+            cols = st.columns(3)
+            call_wide(
+                cols[0].button,
+                "Jeda simulasi" if params["auto"] else "Lanjutkan simulasi",
+                key="cabap_play", disabled=locked, on_click=toggle_play,
+            )
+            call_wide(
+                cols[1].button,
+                "Matikan auto pilot" if ap_on else "Aktifkan auto pilot",
+                key="cabap_ap", disabled=locked, on_click=toggle_autopilot,
+            )
+            call_wide(
+                cols[2].button, "Reset simulasi",
+                key="cabap_reset", disabled=locked, on_click=reset_simulation,
+            )
+
+        if not ap_view:
+            slot_gauges.markdown(
+                notice(
+                    "Kabin Auto Pilot menampilkan nilai <b>hasil perhitungan Fuzzy-PID</b>, bukan pembacaan "
+                    "sensor mentah. Mode auto pilot belum aktif: admin dapat menekan tombol "
+                    "<b>Aktifkan auto pilot</b> di atas (atau di sidebar), lalu jalankan simulasi."
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            hist = ap_view["hist"]
+            order = ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]
+            brake_now = float(ap_view["brake"])
+            boost = float(ap_view["boost"])
+            brake_css, brake_text = brake_style(brake_now)
+            ref_now = {
+                "WOB": float(hist["wob_cmd"][-1]),
+                "RPM": float(hist["rpm_cmd"][-1]),
+                "ROP": float(params["ap_rop_target"]),
+            }
+            ap_now = {p: float(hist[f"ap_{p}"][-1]) for p in order}
+            raw_now = {p: float(hist[f"raw_{p}"][-1]) for p in order}
+            ap_levels = {p: level_for(ap_now[p], THRESHOLDS[p]) for p in order}
+
+            # --- gauge: jarum = hasil auto pilot ---
+            gauges = []
+            for p in order:
+                d = DECIMALS[p]
+                sub = f"Mentah {raw_now[p]:,.{d}f}"
+                if p in ref_now:
+                    sub += f" &middot; Setpoint {ref_now[p]:,.{d}f}"
+                gauges.append(
+                    gauge_html(p, ap_now[p], THRESHOLDS[p], ap_levels[p], False, sub, None, ref_now.get(p), raw_now[p])
+                )
+            legend_gauge = (
+                '<div class="legend-line"><span>Jarum = nilai hasil auto pilot</span>'
+                '<span>Belah ketupat = setpoint / perintah</span><span>Cincin = data mentah rig</span></div>'
+            )
+            slot_gauges.markdown(
+                _h('<div class="cabin-gauges">' + "".join(gauges) + "</div>" + legend_gauge),
+                unsafe_allow_html=True,
+            )
+
+            # --- lampu annunciator (level dihitung dari nilai hasil auto pilot) ---
+            lamps = []
+            for p in order:
+                lv = ap_levels[p]
+                lamps.append(
+                    lamp_html(SHORT_NAME[p], f"on lv{lv}", LEVELS[lv]["name"]) if lv > 0
+                    else lamp_html(SHORT_NAME[p], "ok", "Normal")
+                )
+            lamps.append(
+                lamp_html("Rem putaran", f"on {brake_css}", f"{brake_now * 100:.0f}%") if brake_now >= 0.10
+                else lamp_html("Rem putaran", "ok" if ap_on else "idle", "Tidak aktif")
+            )
+            lamps.append(
+                lamp_html("Booster WOB", "on lv1", f"+{boost * 100:.0f}%") if boost >= 0.01
+                else lamp_html("Booster WOB", "ok" if ap_on else "idle", "Tidak aktif")
+            )
+            lamps.append(lamp_html("Auto pilot", "ok" if ap_on else "idle", "Aktif" if ap_on else "Nonaktif"))
+            lamps.append(
+                lamp_html("ACK", "on lv2", "Belum diakui", blink=True) if snap["ack_required"]
+                else lamp_html("ACK", "ok", "Aman")
+            )
+            lamps.append(
+                lamp_html("Data", "on lverr", "Terlambat" if snap["stale"] else "Sensor")
+                if (snap["stale"] or bad_sensors) else lamp_html("Data", "ok", "Normal")
+            )
+            slot_lamps.markdown(_h('<div class="annun">' + "".join(lamps) + "</div>"), unsafe_allow_html=True)
+
+            # --- panel perintah ke mesin dan setpoint ---
+            wob_css = brake_css if brake_now >= 0.10 else ("lv1" if boost >= 0.01 else "lv0")
+            gains = ap_view["gains"]
+            cmd_cards = [
+                cmd_card_html(
+                    "Perintah WOB (drawworks)", _num(ref_now["WOB"], 1), "kN", wob_css,
+                    f"Aktual AP {ap_now['WOB']:.1f} kN &middot; mentah {raw_now['WOB']:.1f} kN",
+                ),
+                cmd_card_html(
+                    "Perintah RPM (top drive)", _num(ref_now["RPM"], 1), "rpm", brake_css,
+                    f"Aktual AP {ap_now['RPM']:.1f} rpm &middot; mentah {raw_now['RPM']:.1f} rpm",
+                ),
+                cmd_card_html(
+                    "Pengereman putaran", f"{brake_now * 100:.0f}", "%", brake_css,
+                    f"{brake_text} &middot; torsi {ap_view['rise_t']:+.0f}% &middot; tekanan {ap_view['rise_p']:+.0f}%",
+                    brake_now * 100.0,
+                ),
+                cmd_card_html(
+                    "Booster ROP", f"+{boost * 100:.1f}", "%", "lv1" if boost >= 0.01 else "lv0",
+                    f"Maksimum +{AP_MAX_BOOST * 100:.0f}% &middot; target ROP {params['ap_rop_target']:.1f} m/h",
+                    boost / AP_MAX_BOOST * 100.0,
+                ),
+                cmd_card_html(
+                    "Setpoint WOB", _num(params["ap_wob_sp"], 1), "kN", "lv0",
+                    "Perintah = setpoint &times; (1 + booster) &times; (1 &minus; 0,5 &times; rem)",
+                ),
+                cmd_card_html(
+                    "Setpoint RPM", _num(params["ap_rpm_sp"], 1), "rpm", "lv0",
+                    "Perintah = setpoint &times; (1 &minus; 0,7 &times; rem)",
+                ),
+                cmd_card_html(
+                    "ROP hasil auto pilot", _num(ap_now["ROP"], 1), "m/h", "lv0",
+                    f"Target {params['ap_rop_target']:.1f} m/h &middot; mentah {raw_now['ROP']:.1f} m/h",
+                ),
+                cmd_card_html(
+                    "Gain fuzzy kanal WOB", f"Kp {gains['WOB'][0]:.3f}", "", "lv0",
+                    f"Ki {gains['WOB'][1]:.4f} &middot; Kd {gains['WOB'][2]:.3f}",
+                ),
+            ]
+            slot_cmd.markdown(
+                _h('<div class="section-title">Perintah auto pilot dan setpoint</div>'
+                   '<div class="cmd-grid">' + "".join(cmd_cards) + "</div>"),
+                unsafe_allow_html=True,
+            )
+
+            # --- grafik mini: hasil auto pilot tebal, mentah samar, setpoint putus-putus ---
+            tail = visible.tail(STRIP_POINTS)
+            lookup = {name: dict(zip(hist["idx"], hist[f"ap_{name}"])) for name in AP_CHANNEL_LIST}
+            wob_ref_map = dict(zip(hist["idx"], hist["wob_cmd"]))
+            rpm_ref_map = dict(zip(hist["idx"], hist["rpm_cmd"]))
+            strips = []
+            for p in order:
+                ap_series = [lookup[p].get(i, np.nan) for i in tail.index]
+                if p == "WOB":
+                    ref_series = [wob_ref_map.get(i, np.nan) for i in tail.index]
+                elif p == "RPM":
+                    ref_series = [rpm_ref_map.get(i, np.nan) for i in tail.index]
+                elif p == "ROP":
+                    ref_series = [float(params["ap_rop_target"])] * len(tail)
+                else:
+                    ref_series = None
+                strips.append(
+                    strip_html(
+                        p, tail[p].to_numpy(), ap_series, THRESHOLDS[p], f"lv{ap_levels[p]}",
+                        ref_values=ref_series, primary_ap=True,
+                    )
+                )
+            legend_line = (
+                '<div class="legend-line">'
+                '<span><i style="background:var(--accent)"></i>Hasil auto pilot</span>'
+                '<span><i style="background:var(--text)"></i>Setpoint / perintah</span>'
+                '<span><i style="background:var(--muted)"></i>Data mentah rig</span>'
+                '<span><i style="background:var(--lv1)"></i>Ambang kuning</span>'
+                '<span><i style="background:var(--lv2)"></i>Ambang merah</span></div>'
+            )
+            slot_strips.markdown(
+                _h('<div class="section-title">Tren hasil auto pilot</div>' + legend_line
+                   + '<div class="strip-grid">' + "".join(strips) + "</div>"),
+                unsafe_allow_html=True,
+            )
+
+            slot_cmp.markdown(
+                '<div class="section-title">Perbandingan hasil auto pilot dan data mentah</div>'
+                + html_table(kpi_rows_from_hist(hist), ["Indikator", "Data mentah", "Auto pilot"])
+                + _h(f'<div class="view-note">Dihitung dari {len(hist["t"])} sampel sejak auto pilot diaktifkan. '
+                     "Semua nilai pada kabin ini adalah hasil perhitungan Fuzzy-PID (proyeksi model), "
+                     "bukan pembacaan sensor dan bukan kontrol nyata atas rig.</div>"),
+                unsafe_allow_html=True,
+            )
+
+# ==========================================================
+# TAMPILAN DASBOR EWS
+# ==========================================================
+if not cabin_view:
+    # ---- kartu parameter ----
+    with sec_cards:
+        cards = []
+        for parameter in PARAMETERS:
+            name = DISPLAY_NAME.get(parameter, parameter)
+            if parameter in bad_sensors:
+                css = "lverr"
+                value_text = "-"
+                chip = '<div class="chip lverr">Sensor error</div>'
+            else:
+                lv = signal_levels.get(parameter, 0)
+                css = f"lv{lv}"
+                value_text = _num(latest[parameter], DECIMALS[parameter] if parameter != "StandpipePressure" else 0)
+                chip = f'<div class="chip lv{lv}">{LEVELS[lv]["name"]}</div>'
+            rate_html = ""
+            if parameter in rates:
+                roc_lv = signal_levels.get(parameter + ROC_SUFFIX, 0)
+                roc_chip = (
+                    "" if roc_lv == 0
+                    else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
+                )
+                rate_html = f'<div class="card-rate">Laju {rates[parameter]:+.2f} per menit {roc_chip}</div>'
+            cards.append(
+                f'<div class="card {css}"><div class="card-label">{name}</div>'
+                f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
+                f"{chip}{rate_html}</div>"
+            )
+        st.markdown(
+            '<div class="section-title">Monitoring telemetri</div>'
+            + _h('<div class="grid-cards">' + "".join(cards) + "</div>"),
+            unsafe_allow_html=True,
+        )
+
+    # ---- auto pilot ----
+    with sec_ap:
+        st.markdown(
+            '<div class="section-title">Auto pilot Fuzzy-PID (pengereman putaran)</div>',
+            unsafe_allow_html=True,
+        )
+        slot_mode = st.empty()
+        slot_cards = st.empty()
+        slot_brake = st.empty()
+        slot_check = st.empty()
+        slot_chart = st.empty()
+        slot_caption = st.empty()
+        slot_kpi = st.empty()
+        slot_gain = st.empty()
+
+        show_raw = slot_check.checkbox(
+            "Tampilkan data mentah rig (garis samar)", value=True, key="ap_show_raw"
+        )
+        if ap_on:
+            slot_mode.markdown(
+                notice(
+                    "Mode auto pilot <b>AKTIF</b>. Data rig diakuisisi dan diproses pengendali "
+                    "Fuzzy-PID; hasil yang telah dihaluskan tampil pada grafik di bawah."
+                ),
+                unsafe_allow_html=True,
+            )
+        else:
+            slot_mode.markdown(
+                notice(
+                    "Mode auto pilot <b>nonaktif</b>. "
+                    + ("Menampilkan hasil terakhir. " if ap_view else "")
+                    + "Admin dapat mengaktifkannya melalui sidebar."
+                ),
+                unsafe_allow_html=True,
+            )
+
+        if ap_view:
+            hist = ap_view["hist"]
+
+            def series(key):
+                return np.array(hist[key], dtype=float)
+
+            brake = float(ap_view["brake"])
+            boost = float(ap_view["boost"])
+            brake_css, brake_text = brake_style(brake)
+            recent = slice(-30, None)
+            rop_ap = float(np.mean(series("ap_ROP")[recent]))
+            rop_raw = float(np.mean(series("raw_ROP")[recent]))
+            rop_gain = (rop_ap / rop_raw - 1.0) * 100.0 if rop_raw > 0 else 0.0
+
+            ap_cards = [
+                ap_card_html("Perintah WOB", _num(hist["wob_cmd"][-1], 1), "kN",
+                             "lv1" if boost >= 0.01 else "lv0",
+                             f"Booster +{boost * 100:.0f}%" if boost >= 0.01 else "Stabil"),
+                ap_card_html("Perintah RPM", _num(hist["rpm_cmd"][-1], 1), "rpm",
+                             brake_css, "Direm" if brake >= 0.10 else "Normal"),
+                ap_card_html("Pengereman", f"{brake * 100:.0f}", "%", brake_css, brake_text),
+                ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
+                             "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
+            ]
+            slot_cards.markdown(
+                _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
+                unsafe_allow_html=True,
+            )
+            if brake >= 0.10:
+                slot_brake.markdown(
+                    notice(
+                        f"<b>Pengereman putaran aktif ({brake * 100:.0f}%).</b> Torsi "
+                        f"{ap_view['rise_t']:+.0f}% dan standpipe pressure {ap_view['rise_p']:+.0f}% "
+                        "terhadap baseline. RPM dan WOB diturunkan otomatis.",
+                        "err" if brake >= 0.40 else "warn",
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+            nominal = {
+                "ROP": float(params["ap_rop_target"]),
+                "WOB": float(params["ap_wob_sp"]),
+                "RPM": float(params["ap_rpm_sp"]),
+                "Torque": float(ap_view["nom"]["Torque"]),
+                "StandpipePressure": float(ap_view["nom"]["StandpipePressure"]),
+            }
+            depth_arr = series("depth")
+            ap_x_label = "Kedalaman TMD (m)" if np.all(np.isfinite(depth_arr)) else "Waktu"
+            ap_key = (
+                int(ap_view["uid"]), len(hist["t"]), int(hist["idx"][-1]),
+                bool(show_raw), ap_x_label,
+            )
+            png = render_ap_png(ap_key, THEME_NAME, bool(show_raw), nominal, ap_x_label, hist)
+            show_image(slot_chart, png)
+
+            slot_caption.caption(
+                "100% adalah nilai acuan: setpoint auto pilot untuk WOB, RPM, dan ROP, serta "
+                "baseline awal untuk torsi dan standpipe pressure. Area merah menandai saat "
+                "pengereman putaran aktif."
+            )
+
+            kpi_rows = [
+                {"Indikator": "Fluktuasi WOB (rata-rata perubahan per langkah, kN)",
+                 "Data mentah": f"{_mean_abs_change(series('raw_WOB')):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(series('ap_WOB')):.2f}"},
+                {"Indikator": "Fluktuasi ROP (rata-rata perubahan per langkah, m/h)",
+                 "Data mentah": f"{_mean_abs_change(series('raw_ROP')):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(series('ap_ROP')):.2f}"},
+                {"Indikator": "ROP rata-rata (m/h)",
+                 "Data mentah": f"{np.mean(series('raw_ROP')):.2f}",
+                 "Auto pilot": f"{np.mean(series('ap_ROP')):.2f}"},
+                {"Indikator": "Torsi puncak (kN.m)",
+                 "Data mentah": f"{np.max(series('raw_Torque')):.2f}",
+                 "Auto pilot": f"{np.max(series('ap_Torque')):.2f}"},
+                {"Indikator": "Standpipe pressure puncak (psi)",
+                 "Data mentah": f"{np.max(series('raw_StandpipePressure')):,.0f}",
+                 "Auto pilot": f"{np.max(series('ap_StandpipePressure')):,.0f}"},
+                {"Indikator": "RPM rata-rata",
+                 "Data mentah": f"{np.mean(series('raw_RPM')):.1f}",
+                 "Auto pilot": f"{np.mean(series('ap_RPM')):.1f}"},
+                {"Indikator": "Langkah dengan pengereman aktif (>10%)",
+                 "Data mentah": "-",
+                 "Auto pilot": f"{int(np.sum(series('brake') > 0.10))}"},
+            ]
+            slot_kpi.markdown(
+                '<div class="section-title">Ringkasan kinerja auto pilot</div>'
+                + html_table(kpi_rows, ["Indikator", "Data mentah", "Auto pilot"])
+                + _h(f'<div class="view-note">Dihitung dari {len(hist["t"])} sampel yang telah diproses sejak '
+                     "mode auto pilot diaktifkan. Data mentah dan hasil auto pilot sama-sama berasal dari "
+                     "simulasi/playback; hasil auto pilot adalah proyeksi model, bukan kontrol nyata atas rig.</div>"),
+                unsafe_allow_html=True,
+            )
+            gain_rows = [
+                {
+                    "Kanal": f"{DISPLAY_NAME.get(name, name)} ({UNITS[name]})",
+                    "Kp": f"{ap_view['gains'][name][0]:.3f}",
+                    "Ki": f"{ap_view['gains'][name][1]:.4f}",
+                    "Kd": f"{ap_view['gains'][name][2]:.3f}",
+                }
+                for name in AP_CHANNEL_LIST
+            ]
+            slot_gain.markdown(
+                '<div class="section-title">Gain hasil tuning fuzzy saat ini</div>'
+                + html_table(gain_rows, ["Kanal", "Kp", "Ki", "Kd"])
+                + '<div class="view-note">Gain dasar tiap kanal disesuaikan logika fuzzy setiap langkah '
+                  "berdasarkan besar galat dan laju perubahan galat.</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ---- legenda ----
+    with sec_legend:
+        legend_items = "".join(
+            f'<div class="legend-item lv{number}"><b>{LEVELS[number]["name"]}</b>'
+            f'<span>{LEVELS[number]["description"]}</span></div>'
+            for number in range(4)
+        )
+        st.markdown(
+            '<div class="section-title">Keterangan level</div>'
+            + _h(f'<div class="grid-legend">{legend_items}</div>'),
+            unsafe_allow_html=True,
+        )
+
+    # ---- grafik tren parameter ----
+    with sec_trend:
+        st.markdown('<div class="section-title">Grafik tren parameter</div>', unsafe_allow_html=True)
+        st.caption(
+            "Grafik menampilkan maksimal 120 sampel terbaru. Gambar dibuat satu kali per langkah "
+            "data dan dipakai bersama semua perangkat, sehingga tidak berkedip."
+        )
+        selected = st.multiselect(
+            "Pilih parameter yang ditampilkan (lebih sedikit grafik = lebih ringan)",
+            PARAMETERS,
+            default=["ROP", "StandpipePressure"],
+            format_func=lambda x: DISPLAY_NAME.get(x, x),
+            key="trend_selected",
+        )
+        trend_columns = st.columns(2)
+        plot_data = visible.tail(120)
+        use_depth = has_depth and "Depth_m" in plot_data.columns and bool(plot_data["Depth_m"].notna().all())
+        x_values = plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
+        x_label = "Kedalaman TMD (m)" if use_depth else "Waktu"
+        for position, parameter in enumerate(selected):
+            png = render_trend_png(
+                (parameter, int(index), scenario, len(plot_data), x_label),
+                THEME_NAME, parameter, THRESHOLDS[parameter], x_label,
+                x_values, plot_data[parameter],
+            )
+            show_image(trend_columns[position % 2], png)
+
+# ==========================================================
+# RIWAYAT, LOG AUDIT, CATATAN (kedua tampilan)
+# ==========================================================
+with sec_events:
+    st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
+    slot_event_table = st.empty()
+    slot_event_caption = st.empty()
+    slot_event_download = st.empty()
+    shown = 8 if cabin_view else 100
+    if events_list:
+        slot_event_table.markdown(
+            html_table(events_list[:shown], ["Waktu", "Level", "Parameter"], chip_column="Level"),
+            unsafe_allow_html=True,
+        )
+        slot_event_caption.caption(f"Menampilkan {min(len(events_list), shown)} dari {len(events_list)} catatan terbaru.")
+        slot_event_download.download_button(
+            "Unduh riwayat CSV",
+            pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
+            file_name="riwayat_ews.csv",
+            mime="text/csv",
+        )
+    else:
+        slot_event_table.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
+
+with sec_audit:
+    if is_admin and not cabin_view:
+        with st.expander("Log audit (khusus admin)"):
+            slot_audit_table = st.empty()
+            slot_audit_caption = st.empty()
+            slot_audit_download = st.empty()
+            with shared["lock"]:
+                audit_rows = list(shared["audit"])
+            if audit_rows:
+                slot_audit_table.markdown(
+                    html_table(audit_rows[:200], ["Waktu", "Pengguna", "Aksi", "Detail"]),
+                    unsafe_allow_html=True,
+                )
+                slot_audit_caption.caption(
+                    f"Menampilkan {min(len(audit_rows), 200)} entri terbaru dari {len(audit_rows)} "
+                    "(maksimal 2000 disimpan di memori server)."
+                )
+                slot_audit_download.download_button(
+                    "Unduh log audit CSV",
+                    pd.DataFrame(audit_rows).to_csv(index=False).encode("utf-8-sig"),
+                    file_name="log_audit_ews.csv",
+                    mime="text/csv",
+                )
+            else:
+                slot_audit_table.markdown(notice("Belum ada aktivitas tercatat."), unsafe_allow_html=True)
+
+with sec_notes:
+    with st.expander("Catatan keselamatan dan keamanan"):
+        st.write(
+            "Data dan ambang pada program ini hanya untuk demonstrasi dan analisis offline. "
+            "Model tidak memvalidasi kondisi formasi, pipe sticking, kick, loss circulation, "
+            "maupun penyebab NPT. Jangan gunakan sebagai pengganti alarm, setpoint, atau "
+            "prosedur keselamatan rig resmi."
+        )
+        st.write(
+            "Login membatasi akses ke prototipe ini, tetapi bukan pengganti keamanan "
+            "SCADA industri. Batasi akses ke Wi-Fi tepercaya, gunakan password unik, "
+            "dan jangan buka port aplikasi ke internet."
+        )
+
+# ---- perintah bunyi/getar dan perintah berhenti ke browser tiap device ----
+with sec_players:
+    if snap["ack_required"] and snap["alarm"] and snap["alarm_fresh"]:
+        components.html(alarm_player_html(snap["alarm"]), height=0)
+    if snap["ack"] and snap["ack_fresh"]:
+        components.html(ack_stop_html(snap["ack"]), height=0)
+
+# catat lama proses untuk mengatur interval refresh berikutnya
 st.session_state["_run_secs"] = 0.5 * last_run + 0.5 * (time.time() - RUN_START)
