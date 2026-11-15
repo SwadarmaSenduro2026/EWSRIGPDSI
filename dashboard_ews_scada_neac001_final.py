@@ -54,8 +54,9 @@ def call_wide(function, *args, **kwargs):
 # ==========================================================
 DATA_FILE = "data_pemboran_sintetis_10_menit_anomali.xlsx"
 AUTOPILOT_FILE = "data_autopilot_sintetis_600_baris.xlsx"
-FIELD_FILE = "NEAC-001_MLU_Drilling_Ascii_500m_1815baris.xlsx"
-# Data asli 1815 baris (47-500 m) dipangkas ke kedalaman <= 200 m (sekitar 600 baris)
+FIELD_FILE = "NEAC001_Telemetri_Asli_2616m.xlsx"
+FIELD_CSV_FILE = "NEAC001_Telemetri_Asli_2616m.csv"  # fallback saat XLSX belum di-upload
+# Untuk opsi ringan, data asli 10277 baris (47-2616 m) dapat dipangkas <= 200 m.
 # agar playback tidak terlalu panjang dan tidak terlalu pendek.
 FIELD_MAX_DEPTH_M = 200.0
 
@@ -126,7 +127,7 @@ SCENARIOS = [
     "Dataset sintetis asli",
     "Dataset auto pilot (600 baris)",
     "Data lapangan NEAC-001 (47-200 m, sekitar 600 baris)",
-    "Data lapangan NEAC-001 (seluruh data 47-500 m)",
+    "Data lapangan NEAC-001 (seluruh data 47-2616 m)",
 ]
 INTERVAL_OPTIONS = [1, 2, 3, 5, 10]
 BATCH_OPTIONS = [1, 5, 10, 20, 50]
@@ -152,12 +153,14 @@ FIELD_ROC_THRESHOLDS = {
     "StandpipePressure": {"yellow": 12.0, "red": 20.0},
     "RPM": {"yellow": 1.0, "red": 2.0},
 }
+# Ambang demonstrasi berbasis distribusi 47-2616 m, bukan batas keselamatan rig.
+# Perkiraan P90/P97/P99.5 dari data numerik setelah konversi satuan.
 FIELD_FULL_THRESHOLDS = {
-    "ROP": {"yellow": 40.0, "red": 42.0, "magenta": 44.0},
-    "WOB": {"yellow": 62.0, "red": 76.0, "magenta": 88.0},
-    "Torque": {"yellow": 4.50, "red": 4.80, "magenta": 5.20},
-    "StandpipePressure": {"yellow": 1600.0, "red": 1640.0, "magenta": 1670.0},
-    "RPM": {"yellow": 64.0, "red": 66.0, "magenta": 68.0},
+    "ROP": {"yellow": 46.2, "red": 49.6, "magenta": 55.0},
+    "WOB": {"yellow": 76.0, "red": 89.0, "magenta": 110.0},
+    "Torque": {"yellow": 11.7, "red": 13.1, "magenta": 15.0},
+    "StandpipePressure": {"yellow": 3310.0, "red": 3390.0, "magenta": 3460.0},
+    "RPM": {"yellow": 100.0, "red": 101.5, "magenta": 105.0},
 }
 FIELD_FULL_ROC_THRESHOLDS = {
     "ROP": {"yellow": 1.8, "red": 2.8},
@@ -183,7 +186,7 @@ SCENARIO_PRESETS = {
     SCENARIOS[4]: {
         "thresholds": FIELD_FULL_THRESHOLDS,
         "roc_thresholds": FIELD_FULL_ROC_THRESHOLDS,
-        "ap_wob_sp": 30.0, "ap_rpm_sp": 60.0, "ap_rop_target": 34.0,
+        "ap_wob_sp": 49.0, "ap_rpm_sp": 70.0, "ap_rop_target": 33.0,
     },
 }
 DEFAULT_SCENARIO = SCENARIOS[4]
@@ -213,6 +216,7 @@ DEFAULT_PARAMS = {
     "wa_min_level": 2,
     # auto pilot Fuzzy-PID
     "autopilot": False,
+    "ap_manual_setpoint": False,  # OFF = Full Auto: supervisor fuzzy menentukan target sendiri
     "ap_wob_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_wob_sp"],
     "ap_rpm_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rpm_sp"],
     "ap_rop_target": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rop_target"],
@@ -240,6 +244,7 @@ PARAM_LABELS = {
     "wa_enabled": "Notifikasi WhatsApp",
     "wa_min_level": "Level minimum WhatsApp",
     "autopilot": "Mode auto pilot (Fuzzy-PID)",
+    "ap_manual_setpoint": "Aktifkan pengaturan setpoint manual",
     "ap_wob_sp": "Auto pilot: setpoint WOB (kN)",
     "ap_rpm_sp": "Auto pilot: setpoint RPM",
     "ap_rop_target": "Auto pilot: target ROP (m/h)",
@@ -289,7 +294,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v8-neac001"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v9-neac001-full-auto-2616"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -879,14 +884,17 @@ def load_data(path):
 
 @st.cache_data
 def load_field_data(path, max_depth=None):
-    """Muat workbook NEAC-001 dan normalkan satuan. max_depth=None memuat SELURUH data (47-500 m);
+    """Muat NEAC-001 CSV/XLSX dan normalkan satuan; max_depth=None = 47-2616 m;
     isi angka untuk memangkas ke kedalaman <= max_depth (mis. 200 m).
 
     Timestamp di sini adalah indeks playback sintetis (1 menit/baris), bukan
     timestamp akuisisi lapangan. Jarak sampel kedalaman tetap 0,25 m.
     Kolom tambahan (TVD, hook load, RPM total) hanya untuk tampilan kabin driller.
     """
-    raw = pd.read_excel(path, sheet_name=0)
+    if str(path).lower().endswith('.csv'):
+        raw = pd.read_csv(path, encoding='utf-8-sig')
+    else:
+        raw = pd.read_excel(path, sheet_name='Telemetri_Asli')
     required = ["Depth: TMD [m]", "WOB Avg [klb]", "ROP INVERSE CF [min/m]",
                 "RPM Avg [rpm]", "Torque Avg [lbf·ft]", "Pressure: SPP Avg [psi]"]
     missing = [c for c in required if c not in raw.columns]
@@ -997,7 +1005,7 @@ def get_signals(source, index, params):
 
     rates = {}
     window = int(params["roc_window"])
-    if params["roc_enabled"] and index >= window:
+    if params["roc_enabled"] and index >= window and "Depth_m" not in source.columns:
         past = source.iloc[index - window]
         seconds = (row["timestamp"] - past["timestamp"]).total_seconds()
         if seconds > 0:
@@ -1382,6 +1390,79 @@ def fuzzy_brake(rise_t, rise_p, med, high):
     return num / den if den > 0 else 0.0
 
 
+def fuzzy_auto_setpoint(ap, raw):
+    """Full Auto supervisor (Sugeno orde-nol) dari data yang SUDAH tersedia.
+
+    Input: ROP historis, WOB, RPM, torque/WOB, SPP. Output: target WOB/RPM/ROP
+    untuk simulator. Pembatas relatif ke telemetri terbaru menghindari lonjakan;
+    tidak ditujukan untuk operasi rig atau klaim optimum fisik.
+    """
+    hist = ap["auto_recent"]
+    for name in ("ROP", "WOB", "RPM", "Torque", "StandpipePressure"):
+        hist[name].append(float(raw[name]))
+        if len(hist[name]) > 32:
+            hist[name].pop(0)
+
+    wob_med = max(float(np.median(hist["WOB"])), 1.0)
+    rpm_med = max(float(np.median(hist["RPM"])), 1.0)
+    rop_obs = np.asarray(hist["ROP"], dtype=float)
+    rop_obs = rop_obs[rop_obs > 0.1]
+    rop_goal = (float(np.quantile(rop_obs, 0.75)) if len(rop_obs) else max(raw["ROP"], 0.5))
+    rop_goal = _clip(rop_goal, max(0.5, ap["ema"]["ROP"] * 0.85),
+                     max(1.0, float(np.max(rop_obs)) if len(rop_obs) else ap["ema"]["ROP"]))
+
+    # Efisiensi dan hambatan relatif: ini proksi, bukan klasifikasi litologi.
+    tc_hist = [t / max(w, 1.0) for t, w in zip(hist["Torque"], hist["WOB"])]
+    tc_nom = max(float(np.median(tc_hist)), 1e-6)
+    tc_now = raw["Torque"] / max(raw["WOB"], 1.0)
+    spp_nom = max(float(np.median(hist["StandpipePressure"])), 1e-6)
+    tc_rise = max(0.0, tc_now / tc_nom - 1.0)
+    spp_rise = max(0.0, raw["StandpipePressure"] / spp_nom - 1.0)
+    hazard = _clip(max(tc_rise / 0.25, spp_rise / 0.18, ap["brake"]), 0.0, 1.0)
+    deficit = _clip((rop_goal - ap["ema"]["ROP"]) / max(rop_goal, 1e-6), 0.0, 1.0)
+
+    # Fuzzy Sugeno: dimensi defisit ROP (rendah/sedang/tinggi) dan risiko
+    # (rendah/sedang/tinggi), keluaran {-1 .. +1} sebagai arah perubahan WOB.
+    mu_need = (max(0.0, 1 - deficit / 0.12),
+               max(0.0, 1 - abs(deficit - 0.15) / 0.15),
+               _clip((deficit - 0.10) / 0.25, 0.0, 1.0))
+    mu_risk = (max(0.0, 1 - hazard / 0.35),
+               max(0.0, 1 - abs(hazard - 0.45) / 0.35),
+               _clip((hazard - 0.30) / 0.45, 0.0, 1.0))
+    rules = ((0.0, -0.4, -1.0), (0.45, -0.2, -1.0), (1.0, 0.0, -1.0))
+    top = bottom = 0.0
+    for i in range(3):
+        for j in range(3):
+            strength = min(mu_need[i], mu_risk[j])
+            top += strength * rules[i][j]
+            bottom += strength
+    decision = _clip(top / bottom if bottom > 1e-12 else 0.0, -1.0, 1.0)
+
+    prev = ap["auto_targets"]
+    # Target berubah pelan: +/- 1.25% WOB lokal per sampel; batas kerja
+    # relatif mengikuti nilai historis, bukan batas aman mekanis peralatan.
+    wob_step = _clip(decision * wob_med * 0.0125, -wob_med * 0.0125, wob_med * 0.0125)
+    wob_target = _clip(prev["WOB"] + wob_step, max(1.0, wob_med * 0.72), wob_med * 1.22)
+    rpm_desired = rpm_med * (1.0 - 0.08 * hazard)
+    rpm_target = _clip(rpm_desired, prev["RPM"] - rpm_med * 0.015,
+                       prev["RPM"] + rpm_med * 0.015)
+    rpm_target = _clip(rpm_target, max(1.0, rpm_med * 0.80), rpm_med * 1.12)
+    target = {"WOB": float(wob_target), "RPM": float(rpm_target), "ROP": float(rop_goal)}
+    ap["auto_targets"] = target
+    ap["auto_reason"] = ("KURANGI WOB: indikasi hambatan" if decision < -0.15 else
+                         "NAIKKAN WOB: defisit ROP, risiko relatif rendah" if decision > 0.15 else
+                         "TAHAN WOB: kondisi belum mendukung perubahan")
+    return target
+
+
+def effective_ap_setpoints(params, ap_view=None):
+    """Hanya menampilkan target yang benar-benar dipakai oleh model pengendali."""
+    if not params.get("ap_manual_setpoint", False) and ap_view and ap_view.get("auto_targets"):
+        return dict(ap_view["auto_targets"])
+    return {"WOB": float(params["ap_wob_sp"]), "RPM": float(params["ap_rpm_sp"]),
+            "ROP": float(params["ap_rop_target"])}
+
+
 def ap_new(row, params):
     raw = {p: float(row[p]) for p in AP_CHANNELS}
     k0 = raw["ROP"] / max(raw["WOB"] ** AP_A_ROP * raw["RPM"] ** AP_B_ROP, 1e-6)
@@ -1393,10 +1474,13 @@ def ap_new(row, params):
         "base_T": raw["Torque"], "wob_slow": raw["WOB"], "rpm_slow": raw["RPM"], "rop_max": raw["ROP"],
         "nom": {"Torque": raw["Torque"], "StandpipePressure": raw["StandpipePressure"]},
         "brake": 0.0, "boost": 0.0,
+        "auto_targets": {"WOB": raw["WOB"], "RPM": raw["RPM"], "ROP": raw["ROP"]},
+        "auto_reason": "Menunggu data", "auto_recent": {p: [] for p in ("ROP", "WOB", "RPM", "Torque", "StandpipePressure")},
         "rise_t": 0.0, "rise_p": 0.0,
         "ch": {p: new_channel(raw[p]) for p in AP_CHANNELS},
         "hist": {k: [] for k in (
             "t", "idx", "depth", "brake", "boost", "wob_cmd", "rpm_cmd",
+            "auto_sp_WOB", "auto_sp_RPM", "auto_sp_ROP",
             *[f"raw_{p}" for p in AP_CHANNELS], *[f"ap_{p}" for p in AP_CHANNELS],
         )},
         "last_index": None,
@@ -1457,21 +1541,30 @@ def ap_step(ap, row, params, index, timestamp):
     ap["wob_slow"] += slow_rate * (raw["WOB"] - ap["wob_slow"])
     ap["rpm_slow"] += slow_rate * (raw["RPM"] - ap["rpm_slow"])
 
+    # Saat pengaturan manual MATI, tidak membaca ketiga parameter setpoint manual.
+    if params.get("ap_manual_setpoint", False):
+        targets = effective_ap_setpoints(params)
+        ap["auto_targets"] = dict(targets)
+        ap["auto_reason"] = "Target ditentukan dari pengaturan manual"
+    else:
+        targets = fuzzy_auto_setpoint(ap, raw)
+    base_wob, base_rpm, target_rop = targets["WOB"], targets["RPM"], targets["ROP"]
+
     # --- booster ROP: naikkan WOB bila ROP di bawah target dan risiko rendah ---
     rop_y = ap["ch"]["ROP"]["y"]
-    deficit = max(0.0, (params["ap_rop_target"] - rop_y) / max(params["ap_rop_target"], 1e-6))
+    deficit = max(0.0, (target_rop - rop_y) / max(target_rop, 1e-6))
     want = _clip((deficit - 0.10) / 0.30, 0.0, 1.0)
     gate = _clip(1.0 - ap["brake"] / 0.30, 0.0, 1.0)   # booster mati bila ada indikasi bahaya
     boost_target = AP_MAX_BOOST * want * gate
     ap["boost"] += _clip(boost_target - ap["boost"], -0.004, 0.004)
 
     b = ap["brake"]
-    wob_ref = params["ap_wob_sp"] * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
-    rpm_ref = params["ap_rpm_sp"] * (1.0 - 0.7 * b)
+    wob_ref = base_wob * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
+    rpm_ref = base_rpm * (1.0 - 0.7 * b)
 
     ch = ap["ch"]
-    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, params["ap_wob_sp"])
-    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, params["ap_rpm_sp"])
+    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, base_wob)
+    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, base_rpm)
 
     rop_model = ap["K"] * max(wob_y, 1e-6) ** AP_A_ROP * max(rpm_y, 1e-6) ** AP_B_ROP
     wob_ratio = _clip(max(wob_y, 1e-6) / max(ap["wob_slow"], 1e-6), 0.4, 1.6)
@@ -1479,7 +1572,7 @@ def ap_step(ap, row, params, index, timestamp):
     torque_model = ema["Torque"] * wob_ratio ** AP_TORQUE_WOB_EXP * rpm_ratio ** AP_C_TORQUE
     ap["rop_max"] = max(ema["ROP"], ap["rop_max"] * 0.998)
     rop_model = min(rop_model, 1.15 * ap["rop_max"])   # batas kewajaran model
-    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, params["ap_rop_target"])
+    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, target_rop)
     torque_out = fpid_step(ch["Torque"], "Torque", torque_model, ap["nom"]["Torque"])
     spp_out = fpid_step(ch["StandpipePressure"], "StandpipePressure", ema["StandpipePressure"], ap["nom"]["StandpipePressure"])
 
@@ -1491,6 +1584,8 @@ def ap_step(ap, row, params, index, timestamp):
         h["depth"].append(float("nan"))
     h["brake"].append(b); h["boost"].append(ap["boost"])
     h["wob_cmd"].append(wob_ref); h["rpm_cmd"].append(rpm_ref)
+    h["auto_sp_WOB"].append(base_wob); h["auto_sp_RPM"].append(base_rpm)
+    h["auto_sp_ROP"].append(target_rop)
     for p in AP_CHANNELS:
         h[f"raw_{p}"].append(raw[p])
     h["ap_ROP"].append(rop_out); h["ap_WOB"].append(wob_y); h["ap_Torque"].append(torque_out)
@@ -1616,6 +1711,8 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
                 "rise_t": ap_state["rise_t"],
                 "rise_p": ap_state["rise_p"],
                 "nom": dict(ap_state["nom"]),
+                "auto_targets": dict(ap_state["auto_targets"]),
+                "auto_reason": str(ap_state.get("auto_reason", "")),
                 "uid": ap_state.get("uid", 0),
             }
         snapshot = {
@@ -1720,6 +1817,8 @@ def update_param(name, key):
         if old == new:
             return
         shared["params"][name] = new
+        if name == "ap_manual_setpoint":
+            shared["state"]["ap"] = None  # ulang dengan state pengendali bersih
         if name in ("roc_enabled", "roc_window", "test_faulty_sensor"):
             _invalidate_levels()
         _touch()
@@ -2547,7 +2646,7 @@ def rig_autopilot_gauges_markup(ap_view, params):
     ref_now = {
         "WOB": float(hist["wob_cmd"][-1]),
         "RPM": float(hist["rpm_cmd"][-1]),
-        "ROP": float(params["ap_rop_target"]),
+        "ROP": effective_ap_setpoints(params, ap_view)["ROP"],
     }
     thresholds = params["thresholds"]
     gauges = []
@@ -2638,11 +2737,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
     else:
         actuals = {p: float(latest[p]) for p in ("WOB", "RPM", "ROP")}
         actual_label = "data rig"
-    setpoints = {
-        "WOB": float(params["ap_wob_sp"]),
-        "RPM": float(params["ap_rpm_sp"]),
-        "ROP": float(params["ap_rop_target"]),
-    }
+    setpoints = effective_ap_setpoints(params, ap_view if (ap_view and params.get("autopilot")) else None)
     commands = None
     brake = 0.0
     if ap_view:
@@ -2827,13 +2922,16 @@ def try_load(path):
 data, load_error_1 = try_load(DATA_FILE)
 ap_data, load_error_2 = try_load(AUTOPILOT_FILE)
 try:
-    field_full = load_field_data(FIELD_FILE)  # SELURUH data (47-500 m)
-    field_data = load_field_data(FIELD_FILE, FIELD_MAX_DEPTH_M)  # versi dipangkas (47-200 m)
+    from pathlib import Path
+    selected_field_path = (FIELD_FILE if Path(FIELD_FILE).is_file()
+                           else FIELD_CSV_FILE if Path(FIELD_CSV_FILE).is_file() else FIELD_FILE)
+    field_full = load_field_data(selected_field_path)  # full 47-2616 m
+    field_data = load_field_data(selected_field_path, FIELD_MAX_DEPTH_M)  # ringkas 47-200 m
     load_error_3 = None
 except FileNotFoundError:
     field_full, field_data, load_error_3 = None, None, None
 except Exception as error:
-    field_full, field_data, load_error_3 = None, None, f"Gagal membaca {FIELD_FILE}: {error}"
+    field_full, field_data, load_error_3 = None, None, f"Gagal membaca data NEAC-001: {error}"
 for load_error in (load_error_1, load_error_2, load_error_3):
     if load_error:
         st.error(load_error)
@@ -2841,7 +2939,7 @@ for load_error in (load_error_1, load_error_2, load_error_3):
 if data is None and ap_data is None and field_full is None:
     st.error(
         f"File dataset tidak ditemukan. Letakkan {FIELD_FILE} atau {AUTOPILOT_FILE} "
-        "di folder yang sama dengan program ini."
+        "di folder yang sama dengan program ini (atau gunakan file CSV alternatif)."
     )
     st.stop()
 if data is None:
@@ -2877,6 +2975,7 @@ st.session_state["w_test_sensor"] = current["test_faulty_sensor"]
 st.session_state["w_wa_enabled"] = current["wa_enabled"]
 st.session_state["w_wa_min_level"] = current["wa_min_level"]
 st.session_state["w_autopilot"] = current["autopilot"]
+st.session_state["w_ap_manual"] = bool(current.get("ap_manual_setpoint", False))
 st.session_state["w_ap_wob"] = float(current["ap_wob_sp"])
 st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
 st.session_state["w_ap_rop"] = float(current["ap_rop_target"])
@@ -2885,7 +2984,7 @@ st.session_state["w_ap_high"] = float(current["ap_rise_high_pct"])
 st.session_state["w_bit"] = float(current["bit_diameter_in"])
 
 if current["scenario"] in (SCENARIOS[3], SCENARIOS[4]) and field_full is None:
-    st.error(f"File data lapangan {FIELD_FILE} tidak ditemukan di folder aplikasi.")
+    st.error(f"Data lapangan {FIELD_FILE} / {FIELD_CSV_FILE} tidak ditemukan di folder aplikasi.")
     st.stop()
 
 locked = not is_admin
@@ -2931,6 +3030,11 @@ with st.sidebar:
         on_change=update_param, args=("autopilot", "w_autopilot"),
     )
     st.toggle(
+        "Aktifkan pengaturan setpoint manual (OFF = FULL AUTO FUZZY)",
+        key="w_ap_manual", disabled=locked, on_change=update_param,
+        args=("ap_manual_setpoint", "w_ap_manual"),
+    )
+    st.toggle(
         "Aktifkan alarm suara (semua device)", key="w_alarm_enabled", disabled=locked,
         on_change=update_param, args=("alarm_enabled", "w_alarm_enabled"),
     )
@@ -2950,26 +3054,35 @@ with st.sidebar:
     components.html(controller_html(PAL), height=100)
 
     with st.expander("Pengaturan auto pilot (Fuzzy-PID)"):
-        st.caption(
-            "Setpoint yang dipertahankan pengendali. Pengereman putaran aktif saat "
-            "torsi dan standpipe pressure naik bersamaan melewati persentase di bawah "
-            "ini terhadap baseline."
-        )
-        st.number_input(
-            "Setpoint WOB (kN)", min_value=1.0, max_value=100.0, step=0.5,
-            format="%g", key="w_ap_wob", disabled=locked,
-            on_change=update_param, args=("ap_wob_sp", "w_ap_wob"),
-        )
-        st.number_input(
-            "Setpoint RPM", min_value=1.0, max_value=200.0, step=0.5,
-            format="%g", key="w_ap_rpm", disabled=locked,
-            on_change=update_param, args=("ap_rpm_sp", "w_ap_rpm"),
-        )
-        st.number_input(
-            "Target ROP (m/h)", min_value=0.5, max_value=100.0, step=0.5,
-            format="%g", key="w_ap_rop", disabled=locked,
-            on_change=update_param, args=("ap_rop_target", "w_ap_rop"),
-        )
+        if not current.get("ap_manual_setpoint", False):
+            st.success("FULL AUTO FUZZY: setpoint WOB, RPM, dan target ROP dihitung oleh sistem. Input manual tidak digunakan.")
+            with shared["lock"]:
+                _live_ap = shared["state"].get("ap")
+                _live_target = dict(_live_ap["auto_targets"]) if (_live_ap and _live_ap.get("auto_targets")) else None
+                _live_reason = str(_live_ap.get("auto_reason", "")) if _live_ap else ""
+            if _live_target:
+                st.caption(f"WOB: {_live_target['WOB']:.2f} kN | RPM: {_live_target['RPM']:.1f} rpm | Target ROP: {_live_target['ROP']:.2f} m/h")
+                st.caption(_live_reason)
+            else:
+                st.caption("Aktifkan Auto-Pilot dan mulai playback untuk melihat target hasil sistem.")
+        else:
+            st.warning("MODE MANUAL: setpoint berasal dari tiga kolom input operator di bawah.")
+            st.number_input(
+                "Setpoint WOB (kN)", min_value=1.0, max_value=200.0, step=0.5,
+                format="%g", key="w_ap_wob", disabled=locked,
+                on_change=update_param, args=("ap_wob_sp", "w_ap_wob"),
+            )
+            st.number_input(
+                "Setpoint RPM", min_value=1.0, max_value=200.0, step=0.5,
+                format="%g", key="w_ap_rpm", disabled=locked,
+                on_change=update_param, args=("ap_rpm_sp", "w_ap_rpm"),
+            )
+            st.number_input(
+                "Target ROP (m/h)", min_value=0.5, max_value=100.0, step=0.5,
+                format="%g", key="w_ap_rop", disabled=locked,
+                on_change=update_param, args=("ap_rop_target", "w_ap_rop"),
+            )
+        st.caption("Aturan pengereman berbasis torsi dan SPP tetap dapat disetel sebagai parameter uji (bukan setpoint langsung).")
         st.number_input(
             "Kenaikan sedang (%)", min_value=5.0, max_value=50.0, step=1.0,
             format="%g", key="w_ap_med", disabled=locked,
@@ -3241,9 +3354,9 @@ with sec_alerts:
         d_first = _num(simulation_data["Depth_m"].iloc[0], 1)
         d_last = _num(simulation_data["Depth_m"].iloc[-1], 1)
         subset_text = (
-            f"dipangkas dari 1815 baris asli sampai {FIELD_MAX_DEPTH_M:.0f} m"
+            f"subset dari 10.277 baris sumber sampai {FIELD_MAX_DEPTH_M:.0f} m"
             if scenario == SCENARIOS[3]
-            else "seluruh data dari 1815 baris asli; 1 baris dibuang karena ROP inverse bernilai 0. "
+            else "10.277 baris sumber; satu baris dengan ROP inverse nol dikecualikan dari playback. "
                  "Gunakan 'Baris per pembaruan' 10 sampai 50 agar playback tidak terlalu lama"
         )
         slot_field.markdown(
@@ -3251,7 +3364,7 @@ with sec_alerts:
                 f"<b>Data lapangan NEAC-001:</b> {n} baris, kedalaman {d_first} sampai {d_last} m "
                 f"({subset_text}). Satuan dikonversi: "
                 "klbf ke kN, lbf.ft ke kN.m, min/m ke m/h. Timestamp adalah indeks playback sintetis "
-                "(1 menit per baris), bukan waktu akuisisi lapangan.",
+                "(1 menit per baris), bukan waktu akuisisi lapangan. Ambang EWS adalah contoh statistik, bukan batas keselamatan rig.",
             ),
             unsafe_allow_html=True,
         )
@@ -3511,8 +3624,9 @@ if view_ap:
             ref_now = {
                 "WOB": float(hist["wob_cmd"][-1]),
                 "RPM": float(hist["rpm_cmd"][-1]),
-                "ROP": float(params["ap_rop_target"]),
+                "ROP": float(hist["auto_sp_ROP"][-1]),
             }
+            chosen_sp = effective_ap_setpoints(params, ap_view)
             ap_now = {p: float(hist[f"ap_{p}"][-1]) for p in order}
             raw_now = {p: float(hist[f"raw_{p}"][-1]) for p in order}
             ap_levels = {p: level_for(ap_now[p], THRESHOLDS[p]) for p in order}
@@ -3563,20 +3677,20 @@ if view_ap:
                 ),
                 cmd_card_html(
                     "Booster ROP", f"+{boost * 100:.1f}", "%", "lv1" if boost >= 0.01 else "lv0",
-                    f"Maksimum +{AP_MAX_BOOST * 100:.0f}% &middot; target ROP {params['ap_rop_target']:.1f} m/h",
+                    f"Maksimum +{AP_MAX_BOOST * 100:.0f}% &middot; target ROP {chosen_sp['ROP']:.1f} m/h",
                     boost / AP_MAX_BOOST * 100.0,
                 ),
                 cmd_card_html(
-                    "Setpoint WOB", _num(params["ap_wob_sp"], 1), "kN", "lv0",
+                    "Setpoint WOB", _num(chosen_sp["WOB"], 1), "kN", "lv0",
                     "Perintah = setpoint &times; (1 + booster) &times; (1 &minus; 0,5 &times; rem)",
                 ),
                 cmd_card_html(
-                    "Setpoint RPM", _num(params["ap_rpm_sp"], 1), "rpm", "lv0",
+                    "Setpoint RPM", _num(chosen_sp["RPM"], 1), "rpm", "lv0",
                     "Perintah = setpoint &times; (1 &minus; 0,7 &times; rem)",
                 ),
                 cmd_card_html(
                     "ROP hasil auto pilot", _num(ap_now["ROP"], 1), "m/h", "lv0",
-                    f"Target {params['ap_rop_target']:.1f} m/h &middot; mentah {raw_now['ROP']:.1f} m/h",
+                    f"Target {chosen_sp['ROP']:.1f} m/h &middot; mentah {raw_now['ROP']:.1f} m/h",
                 ),
                 cmd_card_html(
                     "Gain fuzzy kanal WOB", f"Kp {gains['WOB'][0]:.3f}", "", "lv0",
@@ -3602,7 +3716,8 @@ if view_ap:
                 elif p == "RPM":
                     ref_series = [rpm_ref_map.get(i, np.nan) for i in tail.index]
                 elif p == "ROP":
-                    ref_series = [float(params["ap_rop_target"])] * len(tail)
+                    ref_map = dict(zip(hist["idx"], hist["auto_sp_ROP"]))
+                    ref_series = [ref_map.get(i, np.nan) for i in tail.index]
                 else:
                     ref_series = None
                 strips.append(
@@ -3661,8 +3776,9 @@ if not cabin_view:
         if ap_on:
             slot_mode.markdown(
                 notice(
-                    "Mode auto pilot <b>AKTIF</b>. Data rig diakuisisi dan diproses pengendali "
-                    "Fuzzy-PID; hasil yang telah dihaluskan tampil pada grafik di bawah."
+                    "Mode auto pilot <b>AKTIF</b>. "
+                    + ("FULL AUTO: setpoint ditentukan Fuzzy Supervisor. " if not params.get("ap_manual_setpoint", False) else "Setpoint manual aktif. ")
+                    + "Data rig diproses Fuzzy-PID; kurva simulasi ditampilkan di bawah."
                 ),
                 unsafe_allow_html=True,
             )
@@ -3716,9 +3832,9 @@ if not cabin_view:
                 )
 
             nominal = {
-                "ROP": float(params["ap_rop_target"]),
-                "WOB": float(params["ap_wob_sp"]),
-                "RPM": float(params["ap_rpm_sp"]),
+                "ROP": effective_ap_setpoints(params, ap_view)["ROP"],
+                "WOB": effective_ap_setpoints(params, ap_view)["WOB"],
+                "RPM": effective_ap_setpoints(params, ap_view)["RPM"],
                 "Torque": float(ap_view["nom"]["Torque"]),
                 "StandpipePressure": float(ap_view["nom"]["StandpipePressure"]),
             }
