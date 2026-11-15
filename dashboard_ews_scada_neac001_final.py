@@ -494,7 +494,34 @@ CABIN_CSS = """
 .fm-legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--muted)}
 .fm-legend i{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:5px;vertical-align:-2px;border:1px solid var(--border)}
 .rig-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+/* Panel kanan rig: instrumen atau monitoring menempel tepat di bawah indikator formasi. */
+.rig-gauge-card,.rig-telemetry-card{overflow:hidden}
+.rig-gauge-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:8px 0}
+.rig-gauge-grid>.gauge{grid-column:span 2;padding:7px 5px 8px;min-width:0}
+.rig-gauge-grid>.gauge:nth-last-child(-n+2){grid-column:span 3}
+.rig-gauge-grid .g-label{font-size:10px}
+.rig-gauge-grid .g-value{font-size:21px}
+.rig-gauge-grid .g-unit{font-size:10px}
+.rig-gauge-grid .g-sub{font-size:10px;line-height:1.35;overflow-wrap:anywhere}
+.rig-gauge-legend{font-size:10px;line-height:1.5;color:var(--muted);padding-top:5px}
+.rig-telemetry-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.rig-telemetry-grid>.card{padding:10px;min-width:0}
+.rig-telemetry-grid>.card:last-child{grid-column:span 2}
+.rig-telemetry-grid .card-value{font-size:24px;overflow-wrap:anywhere}
+.rig-telemetry-grid .card-label{font-size:10px}
+.rig-table-below{margin:2px 0 12px}
+.rig-table-below>.rig-card{min-width:0}
+.rig-side>.rig-stats{grid-template-columns:repeat(3,minmax(0,1fr))}
+.rig-side>.rig-stats .cabin-stat{padding:8px;min-width:0}
+.rig-side>.rig-stats .cabin-stat .v{font-size:18px}
 @media (max-width:1000px){.rig-panel{grid-template-columns:1fr}}
+@media (max-width:640px){
+  .rig-gauge-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .rig-gauge-grid>.gauge,.rig-gauge-grid>.gauge:nth-last-child(-n+2){grid-column:auto}
+  .rig-gauge-grid>.gauge:last-child{grid-column:span 2}
+  .rig-telemetry-grid .card-value{font-size:21px}
+  .rig-side>.rig-stats .cabin-stat .v{font-size:16px}
+}
 .stElementContainer:has(> [data-testid="stVerticalBlock"]:empty){display:none}
 """
 
@@ -2503,7 +2530,90 @@ def rig_svg(depth_now, depth_start, scale_max, unit, segments, class_now, setpoi
     )
 
 
-def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n):
+def rig_autopilot_gauges_markup(ap_view, params):
+    """Pindahkan gauge kabin AP lama ke kolom kanan rig tanpa mengubah jarum atau nilainya."""
+    if not ap_view:
+        return (
+            '<div class="rig-card rig-gauge-card"><div class="rig-k">Instrumen kabin auto pilot</div>'
+            + notice(
+                "Kabin Auto Pilot menampilkan nilai <b>hasil perhitungan Fuzzy-PID</b>, bukan pembacaan "
+                "sensor mentah. Mode auto pilot belum aktif: admin dapat menekan tombol "
+                "<b>Aktifkan auto pilot</b> di bawah (atau di sidebar), lalu jalankan simulasi."
+            ) + '</div>'
+        )
+
+    hist = ap_view["hist"]
+    order = ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]
+    ref_now = {
+        "WOB": float(hist["wob_cmd"][-1]),
+        "RPM": float(hist["rpm_cmd"][-1]),
+        "ROP": float(params["ap_rop_target"]),
+    }
+    thresholds = params["thresholds"]
+    gauges = []
+    for parameter in order:
+        decimals = DECIMALS[parameter]
+        ap_value = float(hist[f"ap_{parameter}"][-1])
+        raw_value = float(hist[f"raw_{parameter}"][-1])
+        level = level_for(ap_value, thresholds[parameter])
+        subtitle = f"Mentah {raw_value:,.{decimals}f}"
+        if parameter in ref_now:
+            subtitle += f" &middot; Setpoint {ref_now[parameter]:,.{decimals}f}"
+        gauges.append(gauge_html(
+            parameter, ap_value, thresholds[parameter], level,
+            False, subtitle, None, ref_now.get(parameter), raw_value,
+        ))
+    legend = (
+        '<div class="rig-gauge-legend">'
+        'Jarum = hasil auto pilot &nbsp;|&nbsp; Belah ketupat = setpoint / perintah '
+        '&nbsp;|&nbsp; Cincin = data mentah rig</div>'
+    )
+    return (
+        '<div class="rig-card rig-gauge-card"><div class="rig-k">Gauge kabin auto pilot</div>'
+        + '<div class="rig-gauge-grid">' + ''.join(gauges) + '</div>'
+        + legend + '</div>'
+    )
+
+
+def rig_ews_telemetry_markup(latest, snap):
+    """Kartu monitoring EWS yang semula di bawah rig, kini berada di kolom kanannya."""
+    params = snap["params"]
+    thresholds = params["thresholds"]
+    bad_sensors = snap["bad_sensors"]
+    signal_levels = snap["signal_levels"]
+    rates = snap["rates"]
+    cards = []
+    for parameter in PARAMETERS:
+        name = DISPLAY_NAME.get(parameter, parameter)
+        if parameter in bad_sensors:
+            css = "lverr"
+            value_text = "-"
+            chip = '<div class="chip lverr">Sensor error</div>'
+        else:
+            lv = signal_levels.get(parameter, 0)
+            css = f"lv{lv}"
+            value_text = _num(latest[parameter], DECIMALS[parameter] if parameter != "StandpipePressure" else 0)
+            chip = f'<div class="chip lv{lv}">{LEVELS[lv]["name"]}</div>'
+        rate_html = ""
+        if parameter in rates:
+            roc_lv = signal_levels.get(parameter + ROC_SUFFIX, 0)
+            roc_chip = (
+                "" if roc_lv == 0
+                else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
+            )
+            rate_html = f'<div class="card-rate">Laju {rates[parameter]:+.2f} per menit {roc_chip}</div>'
+        cards.append(
+            f'<div class="card {css}"><div class="card-label">{name}</div>'
+            f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
+            f"{chip}{rate_html}</div>"
+        )
+    return (
+        '<div class="rig-card rig-telemetry-card"><div class="rig-k">Monitoring telemetri</div>'
+        + '<div class="rig-telemetry-grid">' + ''.join(cards) + '</div></div>'
+    )
+
+
+def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n, ews_snapshot=None):
     """Panel simulasi rig + indikator formasi untuk tampilan EWS dan Kabin Auto Pilot."""
     bit_in = float(params["bit_diameter_in"])
     profile = formation_profile(visible, bit_in)
@@ -2615,10 +2725,18 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
         + stat_html("MSE", _num(mse_now, 1), "MPa")
         + "</div>"
     )
+    if view == "Kabin Auto Pilot":
+        right_panel = rig_autopilot_gauges_markup(ap_view, params)
+    else:
+        right_panel = rig_ews_telemetry_markup(latest, ews_snapshot) if ews_snapshot else ""
+
+    # Formasi selalu berada di atas panel khusus mode. Tabel lama tetap tersedia
+    # tetapi dipindahkan sesudah grid agar tidak mengosongkan atau memperpanjang sisi rig.
     return (
         '<div class="section-title">Simulasi rig dan posisi bit</div>'
         + _h(f'<div class="rig-panel"><div class="rig-card">{svg}</div>')
-        + f'<div class="rig-side">{formation_card}{table_card}{stats_card}</div></div>'
+        + f'<div class="rig-side">{formation_card}{right_panel}{stats_card}</div></div>'
+        + f'<div class="rig-table-below">{table_card}</div>'
     )
 
 
@@ -3017,7 +3135,6 @@ sec_ack = st.container()
 sec_alerts = st.container()
 sec_rig = st.container()
 sec_cabin = st.container()
-sec_cards = st.container()
 sec_ap = st.container()
 sec_legend = st.container()
 sec_trend = st.container()
@@ -3162,7 +3279,7 @@ with sec_alerts:
 with sec_rig:
     if view in ("Dasbor EWS", "Kabin Auto Pilot"):
         st.markdown(
-            build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n),
+            build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n, ews_snapshot=snap),
             unsafe_allow_html=True,
         )
 
@@ -3347,7 +3464,6 @@ if view_raw:
 if view_ap:
     with sec_cabin:
         slot_stats = st.empty()
-        slot_gauges = st.empty()
         slot_lamps = st.empty()
         controls = st.container()
         slot_cmd = st.empty()
@@ -3386,16 +3502,7 @@ if view_ap:
                 key="cabap_reset", disabled=locked, on_click=reset_simulation,
             )
 
-        if not ap_view:
-            slot_gauges.markdown(
-                notice(
-                    "Kabin Auto Pilot menampilkan nilai <b>hasil perhitungan Fuzzy-PID</b>, bukan pembacaan "
-                    "sensor mentah. Mode auto pilot belum aktif: admin dapat menekan tombol "
-                    "<b>Aktifkan auto pilot</b> di atas (atau di sidebar), lalu jalankan simulasi."
-                ),
-                unsafe_allow_html=True,
-            )
-        else:
+        if ap_view:
             hist = ap_view["hist"]
             order = ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]
             brake_now = float(ap_view["brake"])
@@ -3409,25 +3516,6 @@ if view_ap:
             ap_now = {p: float(hist[f"ap_{p}"][-1]) for p in order}
             raw_now = {p: float(hist[f"raw_{p}"][-1]) for p in order}
             ap_levels = {p: level_for(ap_now[p], THRESHOLDS[p]) for p in order}
-
-            # --- gauge: jarum = hasil auto pilot ---
-            gauges = []
-            for p in order:
-                d = DECIMALS[p]
-                sub = f"Mentah {raw_now[p]:,.{d}f}"
-                if p in ref_now:
-                    sub += f" &middot; Setpoint {ref_now[p]:,.{d}f}"
-                gauges.append(
-                    gauge_html(p, ap_now[p], THRESHOLDS[p], ap_levels[p], False, sub, None, ref_now.get(p), raw_now[p])
-                )
-            legend_gauge = (
-                '<div class="legend-line"><span>Jarum = nilai hasil auto pilot</span>'
-                '<span>Belah ketupat = setpoint / perintah</span><span>Cincin = data mentah rig</span></div>'
-            )
-            slot_gauges.markdown(
-                _h('<div class="cabin-gauges">' + "".join(gauges) + "</div>" + legend_gauge),
-                unsafe_allow_html=True,
-            )
 
             # --- lampu annunciator (level dihitung dari nilai hasil auto pilot) ---
             lamps = []
@@ -3550,38 +3638,7 @@ if view_ap:
 # TAMPILAN DASBOR EWS
 # ==========================================================
 if not cabin_view:
-    # ---- kartu parameter ----
-    with sec_cards:
-        cards = []
-        for parameter in PARAMETERS:
-            name = DISPLAY_NAME.get(parameter, parameter)
-            if parameter in bad_sensors:
-                css = "lverr"
-                value_text = "-"
-                chip = '<div class="chip lverr">Sensor error</div>'
-            else:
-                lv = signal_levels.get(parameter, 0)
-                css = f"lv{lv}"
-                value_text = _num(latest[parameter], DECIMALS[parameter] if parameter != "StandpipePressure" else 0)
-                chip = f'<div class="chip lv{lv}">{LEVELS[lv]["name"]}</div>'
-            rate_html = ""
-            if parameter in rates:
-                roc_lv = signal_levels.get(parameter + ROC_SUFFIX, 0)
-                roc_chip = (
-                    "" if roc_lv == 0
-                    else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
-                )
-                rate_html = f'<div class="card-rate">Laju {rates[parameter]:+.2f} per menit {roc_chip}</div>'
-            cards.append(
-                f'<div class="card {css}"><div class="card-label">{name}</div>'
-                f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
-                f"{chip}{rate_html}</div>"
-            )
-        st.markdown(
-            '<div class="section-title">Monitoring telemetri</div>'
-            + _h('<div class="grid-cards">' + "".join(cards) + "</div>"),
-            unsafe_allow_html=True,
-        )
+    # Monitoring telemetri sudah dirender di kolom kanan animasi rig.
 
     # ---- auto pilot ----
     with sec_ap:
