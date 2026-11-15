@@ -183,7 +183,7 @@ SCENARIO_PRESETS = {
     SCENARIOS[4]: {
         "thresholds": FIELD_FULL_THRESHOLDS,
         "roc_thresholds": FIELD_FULL_ROC_THRESHOLDS,
-        "ap_wob_sp": 35.0, "ap_rpm_sp": 60.0, "ap_rop_target": 34.0,
+        "ap_wob_sp": 30.0, "ap_rpm_sp": 60.0, "ap_rop_target": 34.0,
     },
 }
 DEFAULT_SCENARIO = SCENARIOS[4]
@@ -218,6 +218,8 @@ DEFAULT_PARAMS = {
     "ap_rop_target": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rop_target"],
     "ap_rise_med_pct": 15.0,
     "ap_rise_high_pct": 30.0,
+    # simulasi rig dan indikator formasi
+    "bit_diameter_in": 12.25,
 }
 
 PARAM_LABELS = {
@@ -243,6 +245,7 @@ PARAM_LABELS = {
     "ap_rop_target": "Auto pilot: target ROP (m/h)",
     "ap_rise_med_pct": "Auto pilot: kenaikan sedang (%)",
     "ap_rise_high_pct": "Auto pilot: kenaikan tinggi (%)",
+    "bit_diameter_in": "Diameter bit (inci)",
 }
 
 MAX_CATCHUP_STEPS = 30
@@ -286,7 +289,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v7-neac001"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v8-neac001"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -475,6 +478,23 @@ CABIN_CSS = """
 .cmd .bar{height:10px;background:var(--surface2);border-radius:5px;margin-top:8px;overflow:hidden}
 .cmd .bar>div{height:100%;background:var(--c)}
 @media (max-width:1000px){.cmd-grid{grid-template-columns:repeat(2,1fr)}}
+.rig-title-note{font-size:12px;color:var(--muted);margin:-2px 0 8px}
+.rig-panel{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:12px;margin-bottom:10px}
+.rig-card{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:10px 12px;min-width:0}
+.rig-card svg{width:100%;height:auto;display:block}
+.rig-side{display:grid;gap:10px;align-content:start;min-width:0}
+.rig-k{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.fm-head{display:flex;align-items:center;gap:12px}
+.fm-swatch{width:38px;height:38px;border-radius:4px;border:1px solid var(--border);flex:0 0 auto}
+.fm-name{font-size:24px;font-weight:800;line-height:1.1;color:var(--text)}
+.fm-hint{font-size:12px;color:var(--muted)}
+.fm-scale{display:grid;grid-template-columns:repeat(5,1fr);gap:3px;margin:12px 0 6px}
+.fm-scale div{height:10px;border-radius:2px;opacity:.4}
+.fm-scale div.on{opacity:1;outline:2px solid var(--text);outline-offset:1px}
+.fm-legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--muted)}
+.fm-legend i{display:inline-block;width:12px;height:12px;border-radius:2px;margin-right:5px;vertical-align:-2px;border:1px solid var(--border)}
+.rig-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media (max-width:1000px){.rig-panel{grid-template-columns:1fr}}
 .stElementContainer:has(> [data-testid="stVerticalBlock"]:empty){display:none}
 """
 
@@ -518,7 +538,6 @@ def fresh_state():
         "alarm": None,
         "wa_last": {},
         "ap": None,      # keadaan pengendali auto pilot
-        "baseline_sp": None,  # rekomendasi setpoint otomatis ketika Fuzzy-PID OFF
         "n": 1,          # jumlah baris sumber data saat ini
     }
 
@@ -1336,169 +1355,6 @@ def fuzzy_brake(rise_t, rise_p, med, high):
     return num / den if den > 0 else 0.0
 
 
-# ==========================================================
-# SUPERVISOR FUZZY OTOMATIS SAAT AUTO-PILOT ON
-# Setpoint WOB, RPM dan sasaran ROP dihitung dari telemetri yang SUDAH terbaca.
-# Tidak memakai angka setpoint manual di sidebar. Hasil hanya untuk SIMULASI.
-# Skor keanggotaan/ambang di bawah = hipotesis rekayasa, belum optimum rig.
-# ==========================================================
-
-AP_AUTO_WINDOW = 12         # dua jendela x 12 sampel
-AP_AUTO_WOB_RAMP = 0.02     # perubahan target maks 2% acuan lokal per sampel
-AP_AUTO_RPM_RAMP = 0.02
-AP_AUTO_ROP_RAMP = 0.04
-AP_AUTO_BRAKE_MED_PCT = 15.0   # internal, tidak berasal dari kolom operator
-AP_AUTO_BRAKE_HIGH_PCT = 30.0
-
-
-def _auto_membership(value, start, stop):
-    return _clip((float(value) - start) / max(stop - start, 1e-9), 0.0, 1.0)
-
-
-def ap_auto_supervisor_new(row):
-    """Gunakan pembacaan pertama, bukan preset WOB/RPM/ROP dari operator."""
-    def initial(name, fallback):
-        try:
-            v = float(row[name])
-            return v if np.isfinite(v) and v > 0 else fallback
-        except (KeyError, ValueError, TypeError):
-            return fallback
-    return {
-        "wob_sp": initial("WOB", 1.0),
-        "rpm_sp": initial("RPM", 1.0),
-        "rop_sp": initial("ROP", 1.0),
-        "recent": [],
-        "decision": "TAHAN",
-        "reason": "Inisialisasi dari telemetri yang telah terbaca",
-        "risk": 0.0,
-        "confidence": 0.0,
-    }
-
-
-def ap_auto_supervisor_step(supervisor, row, params):
-    """Inferensi Sugeno 0-order kausal dan referensi otomatis yang dibatasi ramp.
-
-    Ini bukan optimasi global WOB: 'terbaik' didekati sebagai pilihan konservatif
-    menurut indikator efisiensi ROP serta rasio Torque/WOB dan SPP.
-    """
-    names = ("ROP", "WOB", "RPM", "Torque", "StandpipePressure")
-    sample = {}
-    for name in names:
-        try:
-            v = float(row[name])
-        except (KeyError, TypeError, ValueError):
-            v = float("nan")
-        sample[name] = v
-    valid = (all(np.isfinite(v) for v in sample.values())
-             and 0 < sample["WOB"] <= PLAUSIBLE_RANGE["WOB"][1]
-             and 0 < sample["RPM"] <= PLAUSIBLE_RANGE["RPM"][1]
-             and 0 < sample["ROP"] <= PLAUSIBLE_RANGE["ROP"][1]
-             and 0 <= sample["Torque"] <= PLAUSIBLE_RANGE["Torque"][1]
-             and 0 < sample["StandpipePressure"] <= PLAUSIBLE_RANGE["StandpipePressure"][1]
-             and params.get("test_faulty_sensor", NO_FAULTY_SENSOR) == NO_FAULTY_SENSOR)
-    if not valid:
-        supervisor.update({"decision": "TAHAN", "reason": "Sensor tidak valid; target simulasi ditahan",
-                           "risk": 1.0, "confidence": 0.0})
-        return supervisor
-
-    supervisor["recent"].append(sample)
-    supervisor["recent"] = supervisor["recent"][-2 * AP_AUTO_WINDOW:]
-    history = supervisor["recent"]
-    if len(history) < 2 * AP_AUTO_WINDOW:
-        supervisor.update({"decision": "TAHAN", "reason": "Mengumpulkan 24 sampel telemetri untuk inferensi fuzzy",
-                           "risk": 0.0, "confidence": 0.0})
-        return supervisor
-
-    left, right = history[:AP_AUTO_WINDOW], history[AP_AUTO_WINDOW:]
-
-    def median(rows, name):
-        return float(np.median([r[name] for r in rows]))
-
-    def eff(rows):
-        return float(np.median([
-            r["ROP"] / max(r["WOB"] ** 0.6 * r["RPM"] ** 0.5, 1e-8)
-            for r in rows
-        ]))
-
-    def t_per_wob(rows):
-        return float(np.median([r["Torque"] / max(r["WOB"], 1e-6) for r in rows]))
-
-    eff_ratio = eff(right) / max(eff(left), 1e-8)
-    t_ratio = t_per_wob(right) / max(t_per_wob(left), 1e-8)
-    p_ratio = median(right, "StandpipePressure") / max(median(left, "StandpipePressure"), 1e-8)
-    wob_ratio = median(right, "WOB") / max(median(left, "WOB"), 1e-8)
-    rpm_ratio = median(right, "RPM") / max(median(left, "RPM"), 1e-8)
-
-    low_eff = _auto_membership(0.98 - eff_ratio, 0.0, 0.22)
-    risk_t = _auto_membership(t_ratio, 1.03, 1.22)
-    risk_p = _auto_membership(p_ratio, 1.03, 1.20)
-    risk = max(risk_t, risk_p)
-    unstable = max(_auto_membership(abs(wob_ratio - 1.0), 0.10, 0.25),
-                   _auto_membership(abs(rpm_ratio - 1.0), 0.08, 0.22))
-    confidence = 1.0 - unstable
-    rise = min(low_eff, 1.0 - risk, confidence)
-    fall = risk
-    hold = max(0.30, 1.0 - max(rise, fall), 1.0 - confidence)
-    # Aturan fuzzy: naik kecil jika efisiensi turun tanpa risiko;
-    # turun bila Torque/WOB atau SPP meningkat; lainnya menuju median lokal.
-    delta_pct = (12.0 * rise - 16.0 * fall) / max(rise + fall + hold, 1e-9)
-    local_wob = median(right, "WOB")
-    local_rpm = median(right, "RPM")
-    local_rop = median(right, "ROP")
-
-    prev_wob = float(supervisor["wob_sp"])
-    prev_rpm = float(supervisor["rpm_sp"])
-    prev_rop = float(supervisor["rop_sp"])
-    if confidence < 0.50:
-        desired_wob, desired_rpm = prev_wob, prev_rpm
-        reason = "WOB/RPM belum stabil; target ditahan"
-    elif risk >= 0.45:
-        desired_wob = min(prev_wob, local_wob * (1.0 + min(delta_pct, 0.0) / 100.0))
-        desired_rpm = min(prev_rpm, local_rpm * (1.0 - 0.04 * risk))
-        reason = "Risiko Torque/WOB atau SPP naik; WOB dan RPM diturunkan terbatas"
-    elif rise >= 0.25 and delta_pct > 1.0:
-        desired_wob = max(local_wob * (1.0 + delta_pct / 100.0),
-                          prev_wob + 0.01 * local_wob * rise)
-        desired_rpm = local_rpm
-        reason = "Efisiensi ROP turun, risiko rendah; WOB dinaikkan terbatas"
-    else:
-        desired_wob, desired_rpm = local_wob, local_rpm
-        reason = "Kondisi stabil; mengikuti median telemetri lokal"
-
-    # Larangan menambah WOB jika indikator absolutenya mencapai ambang
-    # demonstrasi merah. Bukan klaim sebagai batas keselamatan rig nyata.
-    limits = params["thresholds"]
-    risk_absolute = (sample["Torque"] >= limits["Torque"]["red"]
-                     or sample["StandpipePressure"] >= limits["StandpipePressure"]["red"]
-                     or sample["WOB"] >= limits["WOB"]["red"])
-    if risk_absolute and desired_wob > prev_wob:
-        desired_wob = prev_wob
-        reason += "; kenaikan diblokir ambang demonstrasi"
-
-    # Menjaga referensi dalam envelope lokal: tidak mengejar nilai ekstrem.
-    desired_wob = _clip(desired_wob, max(0.5, 0.65 * local_wob), 1.15 * local_wob)
-    desired_rpm = _clip(desired_rpm, max(1.0, 0.70 * local_rpm), 1.10 * local_rpm)
-    if risk_absolute or risk >= 0.45:
-        desired_wob = min(desired_wob, prev_wob)  # tidak naik dalam kondisi risiko
-    desired_rop = local_rop * (1.03 if risk < 0.30 else 0.97)
-    max_delta_wob = max(0.10, AP_AUTO_WOB_RAMP * max(local_wob, 1.0))
-    max_delta_rpm = max(0.20, AP_AUTO_RPM_RAMP * max(local_rpm, 1.0))
-    max_delta_rop = max(0.20, AP_AUTO_ROP_RAMP * max(local_rop, 1.0))
-    wob_new = float(_clip(desired_wob, prev_wob-max_delta_wob, prev_wob+max_delta_wob))
-    rpm_new = float(_clip(desired_rpm, prev_rpm-max_delta_rpm, prev_rpm+max_delta_rpm))
-    rop_new = float(_clip(desired_rop, prev_rop-max_delta_rop, prev_rop+max_delta_rop))
-    supervisor.update({
-        "wob_sp": float(_clip(wob_new, 0.5, PLAUSIBLE_RANGE["WOB"][1])),
-        "rpm_sp": float(_clip(rpm_new, 1.0, PLAUSIBLE_RANGE["RPM"][1])),
-        "rop_sp": float(_clip(rop_new, 0.1, PLAUSIBLE_RANGE["ROP"][1])),
-        "risk": float(risk), "confidence": float(confidence),
-        "decision": ("NAIKKAN" if wob_new > prev_wob + 0.025 else
-                     "TURUNKAN" if wob_new < prev_wob - 0.025 else "TAHAN"),
-        "reason": reason,
-    })
-    return supervisor
-
-
 def ap_new(row, params):
     raw = {p: float(row[p]) for p in AP_CHANNELS}
     k0 = raw["ROP"] / max(raw["WOB"] ** AP_A_ROP * raw["RPM"] ** AP_B_ROP, 1e-6)
@@ -1510,12 +1366,10 @@ def ap_new(row, params):
         "base_T": raw["Torque"], "wob_slow": raw["WOB"], "rpm_slow": raw["RPM"], "rop_max": raw["ROP"],
         "nom": {"Torque": raw["Torque"], "StandpipePressure": raw["StandpipePressure"]},
         "brake": 0.0, "boost": 0.0,
-        "auto_supervisor": ap_auto_supervisor_new(row),
         "rise_t": 0.0, "rise_p": 0.0,
         "ch": {p: new_channel(raw[p]) for p in AP_CHANNELS},
         "hist": {k: [] for k in (
             "t", "idx", "depth", "brake", "boost", "wob_cmd", "rpm_cmd",
-            "rop_auto_sp", "wob_auto_sp", "rpm_auto_sp",
             *[f"raw_{p}" for p in AP_CHANNELS], *[f"ap_{p}" for p in AP_CHANNELS],
         )},
         "last_index": None,
@@ -1540,12 +1394,6 @@ def ap_step(ap, row, params, index, timestamp):
     for p in AP_CHANNELS:
         ema[p] += 0.25 * (raw[p] - ema[p])
 
-    ap_auto_supervisor_step(ap["auto_supervisor"], row, params)
-    auto_ref = ap["auto_supervisor"]
-    auto_wob = float(auto_ref["wob_sp"])
-    auto_rpm = float(auto_ref["rpm_sp"])
-    auto_rop = float(auto_ref["rop_sp"])
-
     if raw["WOB"] > 1e-6 and raw["RPM"] > 1e-6 and raw["ROP"] > 0:
         k_inst = raw["ROP"] / (raw["WOB"] ** AP_A_ROP * raw["RPM"] ** AP_B_ROP)
         ct_inst = raw["Torque"] / (raw["WOB"] * raw["RPM"] ** AP_C_TORQUE)
@@ -1567,7 +1415,7 @@ def ap_step(ap, row, params, index, timestamp):
     rise_ct = (ap["Ct_fast"] / max(ap["base_Ct"], 1e-9) - 1.0) * 100.0
     ap["rise_t"] = min(rise_raw, rise_ct)
     ap["rise_p"] = (ema["StandpipePressure"] / max(ap["base_P"], 1e-6) - 1.0) * 100.0
-    med, high = AP_AUTO_BRAKE_MED_PCT, AP_AUTO_BRAKE_HIGH_PCT
+    med, high = float(params["ap_rise_med_pct"]), float(params["ap_rise_high_pct"])
     target = fuzzy_brake(ap["rise_t"], ap["rise_p"], med, high) if ap["n"] > AP_WARMUP else 0.0
     ap["brake"] += _clip(target - ap["brake"], -AP_RELEASE, AP_ATTACK)
 
@@ -1584,19 +1432,19 @@ def ap_step(ap, row, params, index, timestamp):
 
     # --- booster ROP: naikkan WOB bila ROP di bawah target dan risiko rendah ---
     rop_y = ap["ch"]["ROP"]["y"]
-    deficit = max(0.0, (auto_rop - rop_y) / max(auto_rop, 1e-6))
+    deficit = max(0.0, (params["ap_rop_target"] - rop_y) / max(params["ap_rop_target"], 1e-6))
     want = _clip((deficit - 0.10) / 0.30, 0.0, 1.0)
     gate = _clip(1.0 - ap["brake"] / 0.30, 0.0, 1.0)   # booster mati bila ada indikasi bahaya
     boost_target = AP_MAX_BOOST * want * gate
     ap["boost"] += _clip(boost_target - ap["boost"], -0.004, 0.004)
 
     b = ap["brake"]
-    wob_ref = auto_wob * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
-    rpm_ref = auto_rpm * (1.0 - 0.7 * b)
+    wob_ref = params["ap_wob_sp"] * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
+    rpm_ref = params["ap_rpm_sp"] * (1.0 - 0.7 * b)
 
     ch = ap["ch"]
-    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, auto_wob)
-    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, auto_rpm)
+    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, params["ap_wob_sp"])
+    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, params["ap_rpm_sp"])
 
     rop_model = ap["K"] * max(wob_y, 1e-6) ** AP_A_ROP * max(rpm_y, 1e-6) ** AP_B_ROP
     wob_ratio = _clip(max(wob_y, 1e-6) / max(ap["wob_slow"], 1e-6), 0.4, 1.6)
@@ -1604,7 +1452,7 @@ def ap_step(ap, row, params, index, timestamp):
     torque_model = ema["Torque"] * wob_ratio ** AP_TORQUE_WOB_EXP * rpm_ratio ** AP_C_TORQUE
     ap["rop_max"] = max(ema["ROP"], ap["rop_max"] * 0.998)
     rop_model = min(rop_model, 1.15 * ap["rop_max"])   # batas kewajaran model
-    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, auto_rop)
+    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, params["ap_rop_target"])
     torque_out = fpid_step(ch["Torque"], "Torque", torque_model, ap["nom"]["Torque"])
     spp_out = fpid_step(ch["StandpipePressure"], "StandpipePressure", ema["StandpipePressure"], ap["nom"]["StandpipePressure"])
 
@@ -1616,176 +1464,11 @@ def ap_step(ap, row, params, index, timestamp):
         h["depth"].append(float("nan"))
     h["brake"].append(b); h["boost"].append(ap["boost"])
     h["wob_cmd"].append(wob_ref); h["rpm_cmd"].append(rpm_ref)
-    h["wob_auto_sp"].append(auto_wob)
-    h["rpm_auto_sp"].append(auto_rpm)
-    h["rop_auto_sp"].append(auto_rop)
     for p in AP_CHANNELS:
         h[f"raw_{p}"].append(raw[p])
     h["ap_ROP"].append(rop_out); h["ap_WOB"].append(wob_y); h["ap_Torque"].append(torque_out)
     h["ap_StandpipePressure"].append(spp_out); h["ap_RPM"].append(rpm_y)
     ap["last_index"] = index
-
-
-# ==========================================================
-# REKOMENDASI SETPOINT OTOMATIS SAAT FUZZY-PID OFF
-# Tidak menggunakan inferensi fuzzy dan tidak mengendalikan rig.
-# Perhitungan hanya memakai data sampai sampel aktif (tanpa look-ahead).
-# Ini setpoint HEURISTIK untuk simulasi, BUKAN optimum operasi yang tervalidasi.
-# ==========================================================
-
-def baseline_setpoint_new(row, params):
-    """Inisialisasi rekomendasi dari nilai historis saat ini, tanpa lonjakan."""
-    w = float(row.get("WOB", params["ap_wob_sp"]))
-    r = float(row.get("RPM", params["ap_rpm_sp"]))
-    if not np.isfinite(w) or w <= 0:
-        w = float(params["ap_wob_sp"])
-    if not np.isfinite(r) or r <= 0:
-        r = float(params["ap_rpm_sp"])
-    return {
-        "wob_target": float(w),
-        "rpm_target": float(r),
-        "recent": [],
-        "last_index": None,
-        "scenario": params["scenario"],
-        "active": True,
-        "decision": "TAHAN",
-        "reason": "Mengumpulkan pembacaan historis awal.",
-    }
-
-
-def baseline_setpoint_step(auto, row, params, index):
-    """Aturan konservatif non-fuzzy untuk rekomendasi WOB/RPM.
-
-    Membandingkan dua jendela delapan pembacaan dan membatasi kenaikan/penurunan
-    WOB maksimal 2 persen per sampel, serta membatasi WOB di bawah batas merah
-    EWS (ambang simulasi, bukan envelope keselamatan operasional).
-    """
-    sample = {}
-    for name in ("ROP", "WOB", "RPM", "Torque", "StandpipePressure"):
-        try:
-            v = float(row[name])
-        except (KeyError, ValueError, TypeError):
-            v = float("nan")
-        sample[name] = v
-
-    old_wob = float(auto["wob_target"])
-    old_rpm = float(auto["rpm_target"])
-    valid = (
-        all(np.isfinite(x) for x in sample.values())
-        and sample["WOB"] > 0.0 and sample["RPM"] > 0.0
-        and sample["ROP"] >= 0.0 and sample["Torque"] >= 0.0
-        and sample["StandpipePressure"] >= 0.0
-        and params.get("test_faulty_sensor", NO_FAULTY_SENSOR) == NO_FAULTY_SENSOR
-    )
-
-    if valid:
-        auto["recent"].append(sample)
-        auto["recent"] = auto["recent"][-24:]
-
-    recent = auto["recent"]
-    if not valid:
-        desired = old_wob
-        desired_rpm = old_rpm
-        reason = "Data tidak valid / uji gangguan sensor: setpoint ditahan."
-    elif len(recent) < 16:
-        # Tidak menebak kondisi formasi sebelum dua jendela tersedia.
-        desired = old_wob
-        desired_rpm = old_rpm
-        reason = "Menunggu 16 sampel untuk membandingkan tren telemetri."
-    else:
-        a = recent[-16:-8]
-        b = recent[-8:]
-
-        def med(window, key):
-            return float(np.median([x[key] for x in window]))
-
-        # Proksi efisiensi relatif, bukan pengukuran sifat fisik batuan.
-        def eff(window):
-            return float(np.median([
-                x["ROP"] / max(x["WOB"] ** 0.6 * x["RPM"] ** 0.5, 1e-6)
-                for x in window
-            ]))
-
-        ratio_eff = eff(b) / max(eff(a), 1e-8)
-        torque_load_a = float(np.median([
-            x["Torque"] / max(x["WOB"], 1e-6) for x in a
-        ]))
-        torque_load_b = float(np.median([
-            x["Torque"] / max(x["WOB"], 1e-6) for x in b
-        ]))
-        ratio_t = torque_load_b / max(torque_load_a, 1e-8)
-        ratio_p = med(b, "StandpipePressure") / max(med(a, "StandpipePressure"), 1e-8)
-        local_wob = med(b, "WOB")
-        local_rpm = med(b, "RPM")
-        limits = params["thresholds"]
-        risky = (
-            ratio_t >= 1.12 or ratio_p >= 1.10
-            or (ratio_t >= 1.07 and ratio_p >= 1.06)
-            or sample["Torque"] >= limits["Torque"]["red"]
-            or sample["StandpipePressure"] >= limits["StandpipePressure"]["red"]
-        )
-
-        if risky:
-            desired = local_wob * 0.92
-            desired_rpm = local_rpm * 0.96
-            reason = "Risiko torsi/tekanan meningkat; target WOB/RPM dibatasi."
-        elif med(b, "ROP") < 0.5:
-            desired = min(local_wob, old_wob)
-            desired_rpm = local_rpm
-            reason = "ROP hampir nol; target WOB tidak dinaikkan secara otomatis."
-        elif ratio_eff < 0.93 and ratio_t < 1.06 and ratio_p < 1.06:
-            desired = local_wob * 1.06
-            desired_rpm = local_rpm
-            reason = "Efisiensi ROP relatif menurun tanpa lonjakan beban; target WOB naik terbatas."
-        else:
-            desired = local_wob
-            desired_rpm = local_rpm
-            reason = "Kondisi relatif stabil; target mengikuti median telemetri lokal."
-
-        # Hindari target jauh melampaui kondisi operasional yang pernah diamati.
-        desired = min(desired, local_wob * 1.15)
-        desired = max(desired, local_wob * 0.65)
-        # Ambang merah disini adalah batas perangkat lunak demonstrasi, bukan batas rig.
-        cap_wob = max(1.0, 0.90 * float(limits["WOB"]["red"]))
-        cap_rpm = max(1.0, 0.90 * float(limits["RPM"]["red"]))
-        desired = min(desired, cap_wob)
-        desired_rpm = min(desired_rpm, cap_rpm)
-
-    # Batasi perubahan referensi; tidak memodifikasi data mentah.
-    max_step_wob = max(0.1, 0.02 * max(old_wob, 1.0))
-    max_step_rpm = max(0.2, 0.02 * max(old_rpm, 1.0))
-    new_wob = _clip(desired, old_wob - max_step_wob, old_wob + max_step_wob)
-    new_rpm = _clip(desired_rpm, old_rpm - max_step_rpm, old_rpm + max_step_rpm)
-    auto["wob_target"] = float(max(new_wob, 1.0))
-    auto["rpm_target"] = float(max(new_rpm, 1.0))
-    auto["decision"] = (
-        "NAIKKAN" if new_wob > old_wob + 0.025
-        else "TURUNKAN" if new_wob < old_wob - 0.025 else "TAHAN"
-    )
-    auto["reason"] = reason
-    auto["last_index"] = int(index)
-
-
-def baseline_setpoint_sync(source, params, state):
-    """Aktif hanya ketika Fuzzy-PID OFF; satu update untuk setiap indeks data."""
-    auto = state.get("baseline_sp")
-    if params["autopilot"]:
-        if auto is not None:
-            auto["active"] = False
-        return
-    index = max(0, min(int(state["index"]), len(source) - 1))
-    restart = (
-        auto is None or not auto.get("active", False)
-        or auto["scenario"] != params["scenario"]
-        or auto["last_index"] is None
-        or index < auto["last_index"]
-    )
-    if restart:
-        auto = state["baseline_sp"] = baseline_setpoint_new(source.iloc[index], params)
-        baseline_setpoint_step(auto, source.iloc[index], params, index)
-        return
-    for i in range(auto["last_index"] + 1, index + 1):
-        baseline_setpoint_step(auto, source.iloc[i], params, i)
 
 
 def ap_sync(source, params, state):
@@ -1880,7 +1563,6 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
             evaluate(source, params, state, False, wa_cfg)
 
         ap_sync(source, params, state)
-        baseline_setpoint_sync(source, params, state)
 
         effective_stale = max(float(params["stale_after"]), 2.0 * interval + 1.0)
         age = now - state["last_data_time"]
@@ -1896,7 +1578,7 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
         ack = dict(state["ack"]) if state["ack"] else None
         ap_state = state["ap"]
         ap_snapshot = None
-        if params["autopilot"] and ap_state and ap_state["hist"]["t"]:
+        if ap_state and ap_state["hist"]["t"]:
             ap_snapshot = {
                 "hist": {k: list(v) for k, v in ap_state["hist"].items()},
                 "gains": {
@@ -1907,38 +1589,14 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
                 "rise_t": ap_state["rise_t"],
                 "rise_p": ap_state["rise_p"],
                 "nom": dict(ap_state["nom"]),
-                "auto_supervisor": {
-                    "wob_sp": float(ap_state["auto_supervisor"]["wob_sp"]),
-                    "rpm_sp": float(ap_state["auto_supervisor"]["rpm_sp"]),
-                    "rop_sp": float(ap_state["auto_supervisor"]["rop_sp"]),
-                    "decision": str(ap_state["auto_supervisor"]["decision"]),
-                    "reason": str(ap_state["auto_supervisor"]["reason"]),
-                },
                 "uid": ap_state.get("uid", 0),
             }
-        baseline = state.get("baseline_sp") if not params["autopilot"] else None
-        baseline_snapshot = None
-        if baseline is not None and baseline.get("active", False):
-            baseline_snapshot = {
-                "wob_target": float(baseline["wob_target"]),
-                "rpm_target": float(baseline["rpm_target"]),
-                "decision": str(baseline["decision"]),
-                "reason": str(baseline["reason"]),
-            }
-        display_params = copy.deepcopy(params)
-        if params["autopilot"] and ap_snapshot is not None:
-            # Only UI uses these derived values. Fuzzy-PID itself uses auto_*.
-            auto = ap_snapshot["auto_supervisor"]
-            display_params["ap_wob_sp"] = auto["wob_sp"]
-            display_params["ap_rpm_sp"] = auto["rpm_sp"]
-            display_params["ap_rop_target"] = auto["rop_sp"]
         snapshot = {
-            "baseline_sp": baseline_snapshot,
             "ap": ap_snapshot,
             "ap_on": bool(params["autopilot"]),
             "index": max(0, min(state["index"], n - 1)),
             "events": list(state["events"]),
-            "params": display_params,
+            "params": copy.deepcopy(params),
             "level": level,
             "signal_levels": dict(state["signal_levels"]),
             "rates": dict(state["rates"]),
@@ -2181,6 +1839,7 @@ DECIMALS = {"ROP": 1, "WOB": 1, "Torque": 2, "StandpipePressure": 0, "RPM": 0}
 LEVEL_CLASS = {
     "HIJAU": "lv0", "KUNING": "lv1", "MERAH": "lv2", "MAGENTA": "lv3",
     "GANGGUAN DATA": "lverr", "PULIH": "lv0",
+    "TERCAPAI": "lv0", "NAIKKAN": "lv1", "TURUNKAN": "lv1", "DIREM": "lv2",
 }
 AP_COLORS = {
     "ROP": "#2F80ED", "WOB": "#27AE60", "Torque": "#EB5757",
@@ -2544,6 +2203,425 @@ def cmd_card_html(label, value, unit, css, detail="", progress=None):
     )
 
 
+# ==========================================================
+# SIMULASI RIG, POSISI BIT, DAN INDIKATOR TIPE FORMASI
+# ==========================================================
+# Data lapangan tidak memuat log litologi. Tipe formasi di sini adalah PERKIRAAN KEKERASAN
+# RELATIF dari parameter pengeboran memakai MSE (mechanical specific energy, Teale):
+#   MSE = WOB/A + 2*pi*N*T / (A*ROP)
+# dengan A = luas penampang bit (diameter bit diasumsikan, dapat diubah admin).
+FORMATION_CLASSES = [
+    {"name": "Sangat lunak", "hint": "sedimen lepas (pasir, lanau)", "color": "#E9DDAF"},
+    {"name": "Lunak", "hint": "lempung, batulempung muda", "color": "#CBAF7C"},
+    {"name": "Sedang", "hint": "batulempung / batupasir terkompaksi", "color": "#B08E6A"},
+    {"name": "Agak keras", "hint": "batupasir kompak, lanau keras", "color": "#8C7A6C"},
+    {"name": "Keras", "hint": "batuan kompak (mis. batugamping)", "color": "#666A75"},
+]
+FORMATION_EDGES = [5.0, 15.0, 30.0, 50.0]  # batas MSE (MPa) antar kelas
+STAND_LENGTH_M = 28.5                       # panjang satu stand (gerak top drive pada gambar)
+
+
+def compute_mse(wob_kn, torque_knm, rpm, rop_mh, bit_in):
+    wob = np.asarray(wob_kn, dtype=float)
+    torque = np.asarray(torque_knm, dtype=float)
+    rpm = np.asarray(rpm, dtype=float)
+    rop = np.asarray(rop_mh, dtype=float)
+    diameter = max(float(bit_in), 1.0) * 0.0254
+    area = math.pi * diameter * diameter / 4.0
+    rop_ms = np.maximum(rop, 0.5) / 3600.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mse = (
+            wob * 1000.0 / area
+            + 2.0 * math.pi * (rpm / 60.0) * (torque * 1000.0) / (area * rop_ms)
+        ) / 1e6
+    # baris saat pipa tidak berputar / tidak mengebor tidak dipakai untuk klasifikasi
+    valid = (rpm >= 5.0) & (torque >= 0.05) & (rop >= 1.0) & np.isfinite(mse)
+    return mse, valid
+
+
+def formation_profile(frame, bit_in):
+    """Kelas kekerasan relatif per baris (0 sangat lunak ... 4 keras) dan MSE yang dihaluskan."""
+    mse, valid = compute_mse(frame["WOB"], frame["Torque"], frame["RPM"], frame["ROP"], bit_in)
+    series = pd.Series(np.where(valid, mse, np.nan)).ffill().bfill()
+    if series.isna().all():
+        return None
+    smooth = series.rolling(15, center=True, min_periods=1).median()
+    classes = np.digitize(smooth.to_numpy(), FORMATION_EDGES)
+    classes = (
+        pd.Series(classes).rolling(21, center=True, min_periods=1).median().round().astype(int).to_numpy()
+    )
+    return {"mse": smooth.to_numpy(), "cls": classes}
+
+
+def formation_segments(depth, classes):
+    """Gabungkan baris berurutan berkelas sama menjadi segmen (kedalaman awal, akhir, kelas)."""
+    segments = []
+    start = 0
+    count = len(classes)
+    for i in range(1, count + 1):
+        if i == count or classes[i] != classes[start]:
+            d0 = depth[start] - (depth[start] - depth[start - 1]) / 2.0 if start > 0 else depth[start]
+            d1 = depth[i - 1] + ((depth[i] - depth[i - 1]) / 2.0 if i < count else 0.0)
+            segments.append((float(d0), float(d1), int(classes[start])))
+            start = i
+    return segments
+
+
+def _arrow_v(x, y_from, y_to, outline, color_var):
+    """Panah vertikal: kepala di y_to. outline = garis putus-putus tanpa isi (setpoint)."""
+    direction = 1.0 if y_to > y_from else -1.0
+    shaft_end = y_to - direction * 8.0
+    dash = ' stroke-dasharray="3 2"' if outline else ""
+    width = 2 if outline else 3.4
+    fill = "none" if outline else f"var({color_var})"
+    return (
+        f'<line x1="{x:.1f}" y1="{y_from:.1f}" x2="{x:.1f}" y2="{shaft_end:.1f}" '
+        f'style="stroke:var({color_var})" stroke-width="{width}"{dash}/>'
+        f'<polygon points="{x - 6:.1f},{shaft_end:.1f} {x + 6:.1f},{shaft_end:.1f} {x:.1f},{y_to:.1f}" '
+        f'style="fill:{fill};stroke:var({color_var})" stroke-width="1.6"/>'
+    )
+
+
+def _arrow_ring(cx, cy, rx, outline, color_var):
+    """Panah melingkar (arah putaran) mengelilingi pipa; kepala dihitung manual tanpa <marker>."""
+    ry = rx * 0.32
+    end_angle = -0.5
+    ex, ey = cx + rx * math.cos(end_angle), cy + ry * math.sin(end_angle)
+    tx, ty = -rx * math.sin(end_angle), ry * math.cos(end_angle)  # arah singgung
+    norm = math.hypot(tx, ty) or 1.0
+    tx, ty = tx / norm, ty / norm
+    nx, ny = -ty, tx
+    tip = (ex + tx * 7.0, ey + ty * 7.0)
+    left = (ex + nx * 4.5, ey + ny * 4.5)
+    right = (ex - nx * 4.5, ey - ny * 4.5)
+    dash = ' stroke-dasharray="3 2"' if outline else ""
+    width = 1.8 if outline else 3.0
+    fill = "none" if outline else f"var({color_var})"
+    return (
+        f'<path d="M{cx + rx:.1f} {cy:.1f} A{rx:.1f} {ry:.1f} 0 1 1 {ex:.1f} {ey:.1f}" fill="none" '
+        f'style="stroke:var({color_var})" stroke-width="{width}"{dash}/>'
+        f'<polygon points="{tip[0]:.1f},{tip[1]:.1f} {left[0]:.1f},{left[1]:.1f} {right[0]:.1f},{right[1]:.1f}" '
+        f'style="fill:{fill};stroke:var({color_var})" stroke-width="1.4"/>'
+    )
+
+
+def _tag(x, y, text, anchor="start", strong=False, alert=False):
+    width = len(text) * 5.5 + 10
+    x0 = x if anchor == "start" else x - width
+    box = "fill:var(--lv2);stroke:var(--lv2)" if alert else "fill:var(--surface);stroke:var(--border)"
+    ink = "fill:#fff" if alert else "fill:var(--text)"
+    return (
+        f'<rect x="{x0:.1f}" y="{y - 9:.1f}" width="{width:.1f}" height="14" rx="3" style="{box}" opacity=".93"/>'
+        f'<text x="{x0 + 5:.1f}" y="{y + 1.5:.1f}" font-size="10" style="{ink}" '
+        f'font-weight="{700 if strong else 500}">{html.escape(text)}</text>'
+    )
+
+
+def rig_svg(depth_now, depth_start, scale_max, unit, segments, class_now, setpoints, actuals,
+            woh, brake, stand_fraction, bit_label):
+    """Gambar rig (menara, top drive, pipa bor), lubang bor dengan kolom formasi, bit, dan panah setpoint."""
+    width, height = 350, 470
+    cx, ground, bottom = 160.0, 190.0, 440.0
+    block_x0, block_x1 = 24.0, 300.0
+
+    def y_of(depth):
+        return ground + min(max(depth / scale_max, 0.0), 1.0) * (bottom - ground)
+
+    y_bit = y_of(depth_now)
+    parts = []
+
+    # --- kolom formasi ---
+    parts.append(
+        f'<rect x="{block_x0}" y="{ground}" width="{block_x1 - block_x0}" height="{bottom - ground}" '
+        'style="fill:var(--surface2)"/>'
+    )
+    if depth_start > 0:
+        y_start = y_of(depth_start)
+        if y_start - ground >= 22:
+            parts.append(
+                f'<text x="{block_x0 + 6}" y="{ground + 15}" font-size="10" '
+                'style="fill:var(--muted)">tanpa data</text>'
+            )
+    for d0, d1, cls in segments:
+        y0, y1 = y_of(d0), y_of(d1)
+        if y1 - y0 < 0.4:
+            continue
+        parts.append(
+            f'<rect x="{block_x0}" y="{y0:.1f}" width="{block_x1 - block_x0}" height="{y1 - y0:.1f}" '
+            f'style="fill:{FORMATION_CLASSES[cls]["color"]}"/>'
+        )
+        parts.append(
+            f'<line x1="{block_x0}" y1="{y0:.1f}" x2="{block_x1}" y2="{y0:.1f}" '
+            'style="stroke:var(--bg)" stroke-width="0.8" opacity=".6"/>'
+        )
+    # bagian yang belum dibor
+    parts.append(
+        f'<rect x="{block_x0}" y="{y_bit:.1f}" width="{block_x1 - block_x0}" height="{max(bottom - y_bit, 0):.1f}" '
+        'style="fill:var(--bg)" opacity=".62"/>'
+    )
+    parts.append(
+        f'<line x1="{block_x0}" y1="{y_bit:.1f}" x2="{block_x1}" y2="{y_bit:.1f}" '
+        'style="stroke:var(--text)" stroke-width="1" stroke-dasharray="4 3"/>'
+    )
+    if bottom - y_bit >= 30:
+        parts.append(
+            f'<text x="{(block_x0 + block_x1) / 2:.1f}" y="{(y_bit + bottom) / 2:.1f}" font-size="11" '
+            'text-anchor="middle" style="fill:var(--muted)">belum dibor</text>'
+        )
+    parts.append(
+        f'<rect x="{block_x0}" y="{ground}" width="{block_x1 - block_x0}" height="{bottom - ground}" fill="none" '
+        'style="stroke:var(--border)" stroke-width="1"/>'
+    )
+
+    # --- skala kedalaman ---
+    step = 20 if scale_max <= 120 else 50 if scale_max <= 260 else 100
+    axis_title = "Kedalaman (m)" if unit == "m" else "Progres data (%)"
+    parts.append(
+        f'<text x="{width - 4}" y="{ground - 6}" font-size="9" text-anchor="end" '
+        f'style="fill:var(--muted)">{axis_title}</text>'
+    )
+    tick = 0
+    while tick <= scale_max + 0.1:
+        y = y_of(tick)
+        parts.append(
+            f'<line x1="{block_x1}" y1="{y:.1f}" x2="{block_x1 + 5}" y2="{y:.1f}" style="stroke:var(--muted)" stroke-width="1"/>'
+            f'<text x="{block_x1 + 8}" y="{y + 3:.1f}" font-size="9" style="fill:var(--muted)">{tick:g}</text>'
+        )
+        tick += step
+
+    # --- lubang bor ---
+    parts.append(
+        f'<rect x="{cx - 7}" y="{ground}" width="14" height="{max(y_bit - ground, 0):.1f}" '
+        'style="fill:var(--bg);stroke:var(--border)" stroke-width="1"/>'
+    )
+
+    # --- rig di atas tanah ---
+    y_base, y_top = 168.0, 30.0
+    left0, left1, right0, right1 = cx - 50, cx - 17, cx + 50, cx + 17
+
+    def leg(y, side):
+        ratio = (y_base - y) / (y_base - y_top)
+        return (left0 + (left1 - left0) * ratio) if side == "l" else (right0 + (right1 - right0) * ratio)
+
+    parts.append(
+        f'<rect x="{cx - 62}" y="{y_base}" width="124" height="{ground - y_base}" '
+        'style="fill:var(--surface2);stroke:var(--border)" stroke-width="1"/>'
+    )
+    levels = [y_top, 62, 94, 126, y_base]
+    for y in levels:
+        parts.append(
+            f'<line x1="{leg(y, "l"):.1f}" y1="{y}" x2="{leg(y, "r"):.1f}" y2="{y}" '
+            'style="stroke:var(--muted)" stroke-width="1.4"/>'
+        )
+    for i in range(len(levels) - 1):
+        ya, yb = levels[i], levels[i + 1]
+        if i % 2 == 0:
+            parts.append(
+                f'<line x1="{leg(ya, "l"):.1f}" y1="{ya}" x2="{leg(yb, "r"):.1f}" y2="{yb}" '
+                'style="stroke:var(--muted)" stroke-width="1.2"/>'
+            )
+        else:
+            parts.append(
+                f'<line x1="{leg(ya, "r"):.1f}" y1="{ya}" x2="{leg(yb, "l"):.1f}" y2="{yb}" '
+                'style="stroke:var(--muted)" stroke-width="1.2"/>'
+            )
+    parts.append(
+        f'<line x1="{leg(y_base, "l"):.1f}" y1="{y_base}" x2="{leg(y_top, "l"):.1f}" y2="{y_top}" '
+        'style="stroke:var(--text)" stroke-width="3" stroke-linecap="round"/>'
+        f'<line x1="{leg(y_base, "r"):.1f}" y1="{y_base}" x2="{leg(y_top, "r"):.1f}" y2="{y_top}" '
+        'style="stroke:var(--text)" stroke-width="3" stroke-linecap="round"/>'
+    )
+    parts.append(
+        f'<rect x="{cx - 16}" y="{y_top - 8}" width="32" height="10" rx="2" style="fill:var(--text)" opacity=".85"/>'
+    )
+
+    # top drive / traveling block bergerak turun selama satu stand
+    block_y = 52.0 + stand_fraction * 68.0
+    parts.append(
+        f'<line x1="{cx - 6}" y1="{y_top + 2}" x2="{cx - 5}" y2="{block_y:.1f}" style="stroke:var(--text)" stroke-width="1.2"/>'
+        f'<line x1="{cx + 6}" y1="{y_top + 2}" x2="{cx + 5}" y2="{block_y:.1f}" style="stroke:var(--text)" stroke-width="1.2"/>'
+        f'<rect x="{cx - 14}" y="{block_y:.1f}" width="28" height="30" rx="3" style="fill:var(--accent);stroke:var(--surface)" stroke-width="1.5"/>'
+        f'<text x="{cx}" y="{block_y + 19:.1f}" font-size="10" text-anchor="middle" font-weight="700" style="fill:#fff">TD</text>'
+    )
+    # pipa bor
+    parts.append(
+        f'<line x1="{cx}" y1="{block_y + 30:.1f}" x2="{cx}" y2="{y_bit - 10:.1f}" '
+        'style="stroke:var(--text)" stroke-width="4" opacity=".9"/>'
+        f'<rect x="{cx - 14}" y="{ground - 8}" width="28" height="8" rx="2" style="fill:var(--muted)"/>'
+    )
+    parts.append(
+        f'<line x1="0" y1="{ground}" x2="{width}" y2="{ground}" style="stroke:var(--text)" stroke-width="2"/>'
+    )
+
+    # --- bit ---
+    parts.append(
+        f'<polygon points="{cx - 10:.1f},{y_bit - 10:.1f} {cx + 10:.1f},{y_bit - 10:.1f} {cx:.1f},{y_bit + 8:.1f}" '
+        'style="fill:var(--text);stroke:var(--bg)" stroke-width="1.5"/>'
+        f'<line x1="{cx - 4}" y1="{y_bit - 8:.1f}" x2="{cx - 1}" y2="{y_bit + 2:.1f}" style="stroke:var(--bg)" stroke-width="1"/>'
+        f'<line x1="{cx + 4}" y1="{y_bit - 8:.1f}" x2="{cx + 1}" y2="{y_bit + 2:.1f}" style="stroke:var(--bg)" stroke-width="1"/>'
+    )
+
+    # --- panah setpoint dan aktual ---
+    def scaled(actual, setpoint, base=44.0):
+        ratio = (actual / setpoint) if setpoint else 1.0
+        return min(max(base * ratio, 8.0), 66.0)
+
+    y_end = y_bit - 12
+    top_limit = ground + 4
+    # WOB: gaya turun ke bit
+    base_len = 44.0
+    parts.append(_arrow_v(cx + 30, max(y_end - base_len, top_limit), y_end, True, "--text"))
+    parts.append(_arrow_v(cx + 46, max(y_end - scaled(actuals["WOB"], setpoints["WOB"]), top_limit), y_end, False, "--accent"))
+    parts.append(_tag(cx + 56, y_end - 30, f"WOB SP {setpoints['WOB']:.1f}", strong=True))
+    parts.append(_tag(cx + 56, y_end - 14, f"Akt {actuals['WOB']:.1f} kN"))
+    # ROP: laju penetrasi
+    parts.append(_arrow_v(cx - 28, max(y_end - base_len, top_limit), y_end, True, "--text"))
+    parts.append(_arrow_v(cx - 44, max(y_end - scaled(actuals["ROP"], setpoints["ROP"]), top_limit), y_end, False, "--accent"))
+    parts.append(_tag(cx - 54, y_end - 30, f"ROP SP {setpoints['ROP']:.1f}", anchor="end", strong=True))
+    parts.append(_tag(cx - 54, y_end - 14, f"Akt {actuals['ROP']:.1f} m/h", anchor="end"))
+    # RPM: cincin putar di bawah top drive
+    ring_y = min(block_y + 30 + 22, ground - 14)
+    parts.append(_arrow_ring(cx, ring_y, 25.0, True, "--text"))
+    parts.append(_arrow_ring(cx, ring_y, 17.0, False, "--accent"))
+    parts.append(_tag(cx + 32, ring_y - 6, f"RPM SP {setpoints['RPM']:.0f}", strong=True))
+    parts.append(_tag(cx + 32, ring_y + 10, f"Akt {actuals['RPM']:.0f} rpm"))
+    # hook load
+    if woh is not None and np.isfinite(woh):
+        parts.append(_arrow_v(cx + 24, block_y + 26, block_y - 12, False, "--accent"))
+        parts.append(_tag(cx + 34, block_y - 4, f"WOH {woh:.0f} kN"))
+    # rem putaran
+    if brake >= 0.10:
+        parts.append(_tag(cx - 32, block_y + 14, f"REM {brake * 100:.0f}%", anchor="end", strong=True, alert=True))
+    # label bit
+    parts.append(_tag(block_x0 + 4, min(y_bit + 4, bottom - 8), bit_label, strong=True))
+
+    return (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" role="img">'
+        + "".join(parts)
+        + '<text x="24" y="462" font-size="10" style="fill:var(--muted)">Panah putus-putus = setpoint &#183; panah isi = nilai aktual</text>'
+        + "</svg>"
+    )
+
+
+def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n):
+    """Panel simulasi rig + indikator formasi untuk tampilan EWS dan Kabin Auto Pilot."""
+    bit_in = float(params["bit_diameter_in"])
+    profile = formation_profile(visible, bit_in)
+
+    if has_depth:
+        depth_arr = visible["Depth_m"].to_numpy(dtype=float)
+        depth_now, depth_start = float(depth_arr[-1]), float(depth_arr[0])
+        depth_end = float(simulation_data["Depth_m"].iloc[-1])
+        scale_max = max(50.0, math.ceil(depth_end / 50.0 - 0.02) * 50.0)
+        unit = "m"
+        stand_fraction = ((depth_now - depth_start) % STAND_LENGTH_M) / STAND_LENGTH_M
+    else:
+        depth_arr = np.arange(len(visible)) / max(n - 1, 1) * 100.0
+        depth_now, depth_start, scale_max, unit = float(depth_arr[-1]), 0.0, 100.0, "%"
+        stand_fraction = (index % 30) / 30.0
+
+    ap_mode = view == "Kabin Auto Pilot" and ap_view is not None
+    if ap_mode:
+        hist = ap_view["hist"]
+        actuals = {"WOB": float(hist["ap_WOB"][-1]), "RPM": float(hist["ap_RPM"][-1]), "ROP": float(hist["ap_ROP"][-1])}
+        actual_label = "hasil auto pilot"
+    else:
+        actuals = {p: float(latest[p]) for p in ("WOB", "RPM", "ROP")}
+        actual_label = "data rig"
+    setpoints = {
+        "WOB": float(params["ap_wob_sp"]),
+        "RPM": float(params["ap_rpm_sp"]),
+        "ROP": float(params["ap_rop_target"]),
+    }
+    commands = None
+    brake = 0.0
+    if ap_view:
+        commands = {"WOB": float(ap_view["hist"]["wob_cmd"][-1]), "RPM": float(ap_view["hist"]["rpm_cmd"][-1])}
+        brake = float(ap_view["brake"])
+    woh = float(latest["WOH"]) if "WOH" in latest.index and np.isfinite(float(latest["WOH"])) else None
+
+    if profile is not None:
+        class_now = int(profile["cls"][-1])
+        mse_now = float(profile["mse"][-1])
+        segments = formation_segments(depth_arr, profile["cls"])
+        fm = FORMATION_CLASSES[class_now]
+    else:
+        class_now, mse_now, segments, fm = None, float("nan"), [], None
+
+    bit_label = (f"BIT {depth_now:.1f} m" if unit == "m" else f"BIT {depth_now:.0f}% data") + (f" - {fm['name']}" if fm else "")
+    svg = rig_svg(depth_now, depth_start, scale_max, unit, segments, class_now, setpoints, actuals,
+                  woh, brake, stand_fraction, bit_label)
+
+    # --- kartu tipe formasi ---
+    scale_boxes = "".join(
+        f'<div class="{"on" if class_now == i else ""}" style="background:{c["color"]}"></div>'
+        for i, c in enumerate(FORMATION_CLASSES)
+    )
+    legend = "".join(
+        f'<span><i style="background:{c["color"]}"></i>{c["name"]}</span>' for c in FORMATION_CLASSES
+    )
+    if fm:
+        head = (
+            f'<div class="fm-head"><div class="fm-swatch" style="background:{fm["color"]}"></div>'
+            f'<div><div class="fm-name">{fm["name"]}</div><div class="fm-hint">{fm["hint"]}</div></div></div>'
+        )
+    else:
+        head = '<div class="fm-head"><div><div class="fm-name">Belum terklasifikasi</div><div class="fm-hint">Pipa belum berputar atau belum mengebor.</div></div></div>'
+    caution = ""
+    if brake >= 0.10:
+        caution = notice(
+            "Kekerasan terbaca naik bersamaan dengan indikasi hambatan (torsi dan tekanan naik). "
+            "Kemungkinan <b>bukan</b> perubahan formasi; periksa kondisi lubang.",
+            "warn",
+        )
+    formation_card = (
+        '<div class="rig-card"><div class="rig-k">Tipe formasi yang dihadapi (perkiraan)</div>'
+        + head + f'<div class="fm-scale">{scale_boxes}</div>'
+        + f'<div class="fm-legend">{legend}</div>'
+        + _h(f'<div class="view-note">MSE {_num(mse_now, 1)} MPa dengan diameter bit {bit_in:g} inci '
+             "(asumsi). Indikator ini dihitung dari parameter pengeboran, bukan log litologi.</div>")
+        + caution + "</div>"
+    )
+
+    # --- tabel setpoint ---
+    rows = []
+    for key, label, unit_text, decimals in (("WOB", "WOB", "kN", 1), ("RPM", "RPM", "rpm", 0), ("ROP", "ROP", "m/h", 1)):
+        sp, act = setpoints[key], actuals[key]
+        if key in ("WOB", "RPM") and brake >= 0.10:
+            status = "DIREM"
+        elif key == "ROP":
+            status = "TERCAPAI" if act >= sp * 0.95 else "NAIKKAN"
+        elif abs(act - sp) <= 0.05 * sp:
+            status = "TERCAPAI"
+        else:
+            status = "NAIKKAN" if act < sp else "TURUNKAN"
+        cmd = f"{commands[key]:,.{decimals}f}" if (commands and key in commands) else "-"
+        rows.append({
+            "Parameter": f"{label} ({unit_text})",
+            "Setpoint": f"{sp:,.{decimals}f}",
+            "Perintah": cmd,
+            "Aktual": f"{act:,.{decimals}f}",
+            "Status": status,
+        })
+    table_card = (
+        f'<div class="rig-card"><div class="rig-k">Setpoint dan aktual ({actual_label})</div>'
+        + html_table(rows, ["Parameter", "Setpoint", "Perintah", "Aktual", "Status"], chip_column="Status")
+        + "</div>"
+    )
+    stats_card = (
+        '<div class="rig-stats">'
+        + stat_html("Posisi bit" if unit == "m" else "Posisi relatif", _num(depth_now, 1), unit)
+        + stat_html("ROP", _num(actuals["ROP"], 1), "m/h")
+        + stat_html("MSE", _num(mse_now, 1), "MPa")
+        + "</div>"
+    )
+    return (
+        '<div class="section-title">Simulasi rig dan posisi bit</div>'
+        + _h(f'<div class="rig-panel"><div class="rig-card">{svg}</div>')
+        + f'<div class="rig-side">{formation_card}{table_card}{stats_card}</div></div>'
+    )
+
+
 def kpi_rows_from_hist(hist):
     """Ringkasan kinerja mentah vs auto pilot dari riwayat auto pilot."""
     def series(key):
@@ -2686,6 +2764,7 @@ st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
 st.session_state["w_ap_rop"] = float(current["ap_rop_target"])
 st.session_state["w_ap_med"] = float(current["ap_rise_med_pct"])
 st.session_state["w_ap_high"] = float(current["ap_rise_high_pct"])
+st.session_state["w_bit"] = float(current["bit_diameter_in"])
 
 if current["scenario"] in (SCENARIOS[3], SCENARIOS[4]) and field_full is None:
     st.error(f"File data lapangan {FIELD_FILE} tidak ditemukan di folder aplikasi.")
@@ -2753,52 +2832,52 @@ with st.sidebar:
     components.html(controller_html(PAL), height=100)
 
     with st.expander("Pengaturan auto pilot (Fuzzy-PID)"):
-        if current["autopilot"]:
-            st.caption(
-                "AUTO-PILOT AKTIF — setpoint WOB, RPM, dan target ROP dihitung "
-                "secara otomatis dari telemetri. Tidak perlu input operator."
-            )
-            # Menampilkan kondisi terakhir; satu siklus pertama bisa belum tersedia.
-            with shared["lock"]:
-                last_ap = shared["state"].get("ap")
-                auto_info = (
-                    dict(last_ap["auto_supervisor"])
-                    if last_ap and last_ap.get("active") and last_ap.get("auto_supervisor")
-                    else None
-                )
-            if auto_info:
-                st.write(f"**WOB otomatis:** {auto_info['wob_sp']:.2f} kN")
-                st.write(f"**RPM otomatis:** {auto_info['rpm_sp']:.1f} rpm")
-                st.write(f"**Target ROP otomatis:** {auto_info['rop_sp']:.1f} m/h")
-                st.caption(f"Keputusan: {auto_info['decision']} — {auto_info['reason']}")
-            else:
-                st.caption("Menunggu sampel pertama setelah Auto-Pilot diaktifkan.")
-        else:
-            st.caption(
-                "Fuzzy-PID OFF. Setpoint rekomendasi saat ini dihitung oleh "
-                "baseline otomatis. Pengaturan lama berikut hanya tersimpan "
-                "untuk kompatibilitas dan tidak dipakai oleh mode otomatis."
-            )
-            st.number_input(
-                "Setpoint WOB (kN)", min_value=1.0, max_value=100.0, step=0.5,
-                format="%g", key="w_ap_wob", disabled=True,
-            )
-            st.number_input(
-                "Setpoint RPM", min_value=1.0, max_value=200.0, step=0.5,
-                format="%g", key="w_ap_rpm", disabled=True,
-            )
-            st.number_input(
-                "Target ROP (m/h)", min_value=0.5, max_value=100.0, step=0.5,
-                format="%g", key="w_ap_rop", disabled=True,
-            )
-            st.number_input(
-                "Kenaikan sedang (%)", min_value=5.0, max_value=50.0, step=1.0,
-                format="%g", key="w_ap_med", disabled=True,
-            )
-            st.number_input(
-                "Kenaikan tinggi (%)", min_value=10.0, max_value=100.0, step=1.0,
-                format="%g", key="w_ap_high", disabled=True,
-            )
+        st.caption(
+            "Setpoint yang dipertahankan pengendali. Pengereman putaran aktif saat "
+            "torsi dan standpipe pressure naik bersamaan melewati persentase di bawah "
+            "ini terhadap baseline."
+        )
+        st.number_input(
+            "Setpoint WOB (kN)", min_value=1.0, max_value=100.0, step=0.5,
+            format="%g", key="w_ap_wob", disabled=locked,
+            on_change=update_param, args=("ap_wob_sp", "w_ap_wob"),
+        )
+        st.number_input(
+            "Setpoint RPM", min_value=1.0, max_value=200.0, step=0.5,
+            format="%g", key="w_ap_rpm", disabled=locked,
+            on_change=update_param, args=("ap_rpm_sp", "w_ap_rpm"),
+        )
+        st.number_input(
+            "Target ROP (m/h)", min_value=0.5, max_value=100.0, step=0.5,
+            format="%g", key="w_ap_rop", disabled=locked,
+            on_change=update_param, args=("ap_rop_target", "w_ap_rop"),
+        )
+        st.number_input(
+            "Kenaikan sedang (%)", min_value=5.0, max_value=50.0, step=1.0,
+            format="%g", key="w_ap_med", disabled=locked,
+            on_change=update_param, args=("ap_rise_med_pct", "w_ap_med"),
+        )
+        st.number_input(
+            "Kenaikan tinggi (%)", min_value=10.0, max_value=100.0, step=1.0,
+            format="%g", key="w_ap_high", disabled=locked,
+            on_change=update_param, args=("ap_rise_high_pct", "w_ap_high"),
+        )
+        inline_warning(
+            current["ap_rise_med_pct"] >= current["ap_rise_high_pct"],
+            "Kenaikan sedang harus lebih kecil dari kenaikan tinggi",
+        )
+
+    with st.expander("Simulasi rig dan formasi"):
+        st.number_input(
+            "Diameter bit (inci)", min_value=4.0, max_value=36.0, step=0.25,
+            format="%g", key="w_bit", disabled=locked,
+            on_change=update_param, args=("bit_diameter_in", "w_bit"),
+        )
+        st.caption(
+            "Dipakai menghitung MSE sebagai penaksir kekerasan relatif formasi. Data NEAC-001 tidak "
+            "memuat ukuran bit, jadi 12,25 inci adalah asumsi. Mengubahnya menggeser klasifikasi, "
+            "bukan menambah informasi litologi."
+        )
 
     with st.expander("Ambang alarm (demonstrasi)"):
         for parameter in PARAMETERS:
@@ -2936,6 +3015,7 @@ cabin_view = view != "Dasbor EWS"
 sec_status = st.container()
 sec_ack = st.container()
 sec_alerts = st.container()
+sec_rig = st.container()
 sec_cabin = st.container()
 sec_cards = st.container()
 sec_ap = st.container()
@@ -2959,7 +3039,6 @@ rates = snap["rates"]
 bad_sensors = snap["bad_sensors"]
 ap_view = snap["ap"]
 ap_on = snap["ap_on"]
-baseline_sp = snap["baseline_sp"]
 
 n = len(simulation_data)
 index = snap["index"]
@@ -3079,6 +3158,14 @@ with sec_alerts:
             unsafe_allow_html=True,
         )
 
+# ---------------------------- SIMULASI RIG DAN FORMASI ----------------------------
+with sec_rig:
+    if view in ("Dasbor EWS", "Kabin Auto Pilot"):
+        st.markdown(
+            build_rig_markup(view, visible, simulation_data, latest, params, ap_view, has_depth, index, n),
+            unsafe_allow_html=True,
+        )
+
 # ==========================================================
 # TAMPILAN KABIN DRILLER
 # ==========================================================
@@ -3126,8 +3213,7 @@ if view_raw:
                     signal_levels.get(parameter, 0),
                     bad,
                     rate_text,
-                    (ap_last[parameter] if (ap_last and ap_on) else
-                     baseline_sp["wob_target"] if (parameter == "WOB" and baseline_sp) else None),
+                    ap_last[parameter] if (ap_last and ap_on) else None,
                 )
             )
         slot_gauges.markdown(_h('<div class="cabin-gauges">' + "".join(gauges) + "</div>"), unsafe_allow_html=True)
@@ -3218,14 +3304,7 @@ if view_raw:
         else:
             slot_ap.markdown(
                 _h('<div class="section-title">Auto pilot Fuzzy-PID</div>')
-                + notice(
-                    (f"<b>Fuzzy-PID OFF.</b> Setpoint WOB otomatis: "
-                     f"<b>{baseline_sp['wob_target']:.2f} kN</b> "
-                     f"({baseline_sp['decision']}). {html.escape(baseline_sp['reason'])} "
-                     "Setpoint ini rekomendasi simulasi, bukan perintah rig."
-                     if baseline_sp else
-                     "Mode auto pilot nonaktif. Menunggu data untuk menghitung setpoint otomatis.")
-                ),
+                + notice("Mode auto pilot nonaktif. Admin dapat mengaktifkannya dengan tombol di atas atau di sidebar."),
                 unsafe_allow_html=True,
             )
 
@@ -3311,11 +3390,8 @@ if view_ap:
             slot_gauges.markdown(
                 notice(
                     "Kabin Auto Pilot menampilkan nilai <b>hasil perhitungan Fuzzy-PID</b>, bukan pembacaan "
-                    "sensor mentah. Fuzzy-PID sedang OFF. "
-                    + (f"Setpoint WOB otomatis: <b>{baseline_sp['wob_target']:.2f} kN</b> "
-                       f"({baseline_sp['decision']}). {html.escape(baseline_sp['reason'])} "
-                       if baseline_sp else "Menunggu rekomendasi otomatis. ")
-                    + "Untuk pengendalian Fuzzy-PID, aktifkan tombol di atas atau di sidebar."
+                    "sensor mentah. Mode auto pilot belum aktif: admin dapat menekan tombol "
+                    "<b>Aktifkan auto pilot</b> di atas (atau di sidebar), lalu jalankan simulasi."
                 ),
                 unsafe_allow_html=True,
             )
@@ -3380,7 +3456,7 @@ if view_ap:
             )
             slot_lamps.markdown(_h('<div class="annun">' + "".join(lamps) + "</div>"), unsafe_allow_html=True)
 
-            # --- panel perintah ke mesin dan setpoint (otonom, non-manual) ---
+            # --- panel perintah ke mesin dan setpoint ---
             wob_css = brake_css if brake_now >= 0.10 else ("lv1" if boost >= 0.01 else "lv0")
             gains = ap_view["gains"]
             cmd_cards = [
@@ -3438,8 +3514,7 @@ if view_ap:
                 elif p == "RPM":
                     ref_series = [rpm_ref_map.get(i, np.nan) for i in tail.index]
                 elif p == "ROP":
-                    rop_ref_map = dict(zip(hist["idx"], hist["rop_auto_sp"]))
-                    ref_series = [rop_ref_map.get(i, np.nan) for i in tail.index]
+                    ref_series = [float(params["ap_rop_target"])] * len(tail)
                 else:
                     ref_series = None
                 strips.append(
@@ -3537,11 +3612,9 @@ if not cabin_view:
         else:
             slot_mode.markdown(
                 notice(
-                    "Mode auto pilot Fuzzy-PID <b>nonaktif</b>. "
-                    + (f"Setpoint WOB otomatis: <b>{baseline_sp['wob_target']:.2f} kN</b> "
-                       f"({baseline_sp['decision']}). " if baseline_sp else "")
-                    + "Setpoint ini rekomendasi non-fuzzy, bukan keluaran PID. "
-                    + "Admin dapat mengaktifkan Fuzzy-PID melalui sidebar."
+                    "Mode auto pilot <b>nonaktif</b>. "
+                    + ("Menampilkan hasil terakhir. " if ap_view else "")
+                    + "Admin dapat mengaktifkannya melalui sidebar."
                 ),
                 unsafe_allow_html=True,
             )
