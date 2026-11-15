@@ -482,7 +482,15 @@ CABIN_CSS = """
 .rig-panel{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:12px;margin-bottom:10px}
 .rig-card{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:10px 12px;min-width:0}
 .rig-card svg{width:100%;height:auto;display:block}
+@media (max-width:1000px){.ap-rig-trends{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){.ap-rig-trends{grid-template-columns:1fr}}
 .rig-side{display:grid;gap:10px;align-content:start;min-width:0}
+.ap-trend-card{padding:9px 10px}
+.ap-rig-trends{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.ap-rig-trends .strip{padding:6px 7px}
+.ap-rig-trends .strip svg{height:54px}
+.ap-rig-trends .strip .s-name{font-size:10px}
+.ap-rig-trends .strip .s-val{font-size:12px}
 .rig-k{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
 .fm-head{display:flex;align-items:center;gap:12px}
 .fm-swatch{width:38px;height:38px;border-radius:4px;border:1px solid var(--border);flex:0 0 auto}
@@ -2583,6 +2591,49 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
         + caution + "</div>"
     )
 
+    # Pada Kabin Auto Pilot, tren ditempatkan tepat di bawah indikator formasi
+    # dalam kolom kanan panel rig, bukan sebagai panel terpisah di bawah halaman.
+    ap_trend_card = ""
+    if view == "Kabin Auto Pilot" and ap_view is not None:
+        hist_trend = ap_view["hist"]
+        tail_trend = visible.tail(STRIP_POINTS)
+        lookup_trend = {
+            name: dict(zip(hist_trend["idx"], hist_trend[f"ap_{name}"]))
+            for name in AP_CHANNEL_LIST
+        }
+        wob_ref = dict(zip(hist_trend["idx"], hist_trend["wob_cmd"]))
+        rpm_ref = dict(zip(hist_trend["idx"], hist_trend["rpm_cmd"]))
+        trend_strips = []
+        for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
+            ap_values = [lookup_trend[parameter].get(i, np.nan) for i in tail_trend.index]
+            if parameter == "WOB":
+                ref_values = [wob_ref.get(i, np.nan) for i in tail_trend.index]
+            elif parameter == "RPM":
+                ref_values = [rpm_ref.get(i, np.nan) for i in tail_trend.index]
+            elif parameter == "ROP":
+                ref_values = [float(params["ap_rop_target"])] * len(tail_trend)
+            else:
+                ref_values = None
+            trend_strips.append(strip_html(
+                parameter, tail_trend[parameter].to_numpy(), ap_values,
+                THRESHOLDS[parameter], f"lv{level_for(float(hist_trend[f'ap_{parameter}'][-1]), THRESHOLDS[parameter])}",
+                ref_values=ref_values, primary_ap=True,
+            ))
+        trend_legend = (
+            '<div class="legend-line">'
+            '<span><i style="background:var(--accent)"></i>Hasil auto pilot</span>'
+            '<span><i style="background:var(--text)"></i>Setpoint / perintah</span>'
+            '<span><i style="background:var(--muted)"></i>Data mentah</span>'
+            '</div>'
+        )
+        ap_trend_card = (
+            '<div class="rig-card ap-trend-card">'
+            '<div class="rig-k">Tren hasil auto pilot</div>'
+            + trend_legend
+            + '<div class="ap-rig-trends">' + "".join(trend_strips) + '</div>'
+            '</div>'
+        )
+
     # --- tabel setpoint ---
     rows = []
     for key, label, unit_text, decimals in (("WOB", "WOB", "kN", 1), ("RPM", "RPM", "rpm", 0), ("ROP", "ROP", "m/h", 1)):
@@ -2618,7 +2669,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
     return (
         '<div class="section-title">Simulasi rig dan posisi bit</div>'
         + _h(f'<div class="rig-panel"><div class="rig-card">{svg}</div>')
-        + f'<div class="rig-side">{formation_card}{table_card}{stats_card}</div></div>'
+        + f'<div class="rig-side">{formation_card}{ap_trend_card}{table_card}{stats_card}</div></div>'
     )
 
 
@@ -3351,7 +3402,6 @@ if view_ap:
         slot_lamps = st.empty()
         controls = st.container()
         slot_cmd = st.empty()
-        slot_strips = st.empty()
         slot_cmp = st.empty()
 
         if has_depth:
@@ -3501,41 +3551,8 @@ if view_ap:
                 unsafe_allow_html=True,
             )
 
-            # --- grafik mini: hasil auto pilot tebal, mentah samar, setpoint putus-putus ---
-            tail = visible.tail(STRIP_POINTS)
-            lookup = {name: dict(zip(hist["idx"], hist[f"ap_{name}"])) for name in AP_CHANNEL_LIST}
-            wob_ref_map = dict(zip(hist["idx"], hist["wob_cmd"]))
-            rpm_ref_map = dict(zip(hist["idx"], hist["rpm_cmd"]))
-            strips = []
-            for p in order:
-                ap_series = [lookup[p].get(i, np.nan) for i in tail.index]
-                if p == "WOB":
-                    ref_series = [wob_ref_map.get(i, np.nan) for i in tail.index]
-                elif p == "RPM":
-                    ref_series = [rpm_ref_map.get(i, np.nan) for i in tail.index]
-                elif p == "ROP":
-                    ref_series = [float(params["ap_rop_target"])] * len(tail)
-                else:
-                    ref_series = None
-                strips.append(
-                    strip_html(
-                        p, tail[p].to_numpy(), ap_series, THRESHOLDS[p], f"lv{ap_levels[p]}",
-                        ref_values=ref_series, primary_ap=True,
-                    )
-                )
-            legend_line = (
-                '<div class="legend-line">'
-                '<span><i style="background:var(--accent)"></i>Hasil auto pilot</span>'
-                '<span><i style="background:var(--text)"></i>Setpoint / perintah</span>'
-                '<span><i style="background:var(--muted)"></i>Data mentah rig</span>'
-                '<span><i style="background:var(--lv1)"></i>Ambang kuning</span>'
-                '<span><i style="background:var(--lv2)"></i>Ambang merah</span></div>'
-            )
-            slot_strips.markdown(
-                _h('<div class="section-title">Tren hasil auto pilot</div>' + legend_line
-                   + '<div class="strip-grid">' + "".join(strips) + "</div>"),
-                unsafe_allow_html=True,
-            )
+            # Grafik tren hasil auto pilot sudah ditampilkan di kolom kanan,
+            # tepat di bawah indikator tipe formasi pada panel simulasi rig.
 
             slot_cmp.markdown(
                 '<div class="section-title">Perbandingan hasil auto pilot dan data mentah</div>'
@@ -3743,55 +3760,81 @@ if not cabin_view:
 
     # ---- grafik tren parameter ----
     with sec_trend:
-        st.markdown('<div class="section-title">Grafik tren parameter</div>', unsafe_allow_html=True)
-        st.caption(
-            "Grafik menampilkan maksimal 120 sampel terbaru. Gambar dibuat satu kali per langkah "
-            "data dan dipakai bersama semua perangkat, sehingga tidak berkedip."
-        )
-        selected = st.multiselect(
-            "Pilih parameter yang ditampilkan (lebih sedikit grafik = lebih ringan)",
-            PARAMETERS,
-            default=["ROP", "StandpipePressure"],
-            format_func=lambda x: DISPLAY_NAME.get(x, x),
-            key="trend_selected",
-        )
-        trend_columns = st.columns(2)
-        plot_data = visible.tail(120)
-        use_depth = has_depth and "Depth_m" in plot_data.columns and bool(plot_data["Depth_m"].notna().all())
-        x_values = plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
-        x_label = "Kedalaman TMD (m)" if use_depth else "Waktu"
-        for position, parameter in enumerate(selected):
-            png = render_trend_png(
-                (parameter, int(index), scenario, len(plot_data), x_label),
-                THEME_NAME, parameter, THRESHOLDS[parameter], x_label,
-                x_values, plot_data[parameter],
+        if not cabin_view:
+            trend_col, event_col = st.columns([1.65, 1], gap="large")
+        else:
+            trend_col, event_col = st.container(), None
+
+        with trend_col:
+            st.markdown('<div class="section-title">Grafik tren parameter</div>', unsafe_allow_html=True)
+            st.caption(
+                "Grafik menampilkan maksimal 120 sampel terbaru. Gambar dibuat satu kali per langkah "
+                "data dan dipakai bersama semua perangkat, sehingga tidak berkedip."
             )
-            show_image(trend_columns[position % 2], png)
+            selected = st.multiselect(
+                "Pilih parameter yang ditampilkan (lebih sedikit grafik = lebih ringan)",
+                PARAMETERS,
+                default=["ROP", "StandpipePressure"],
+                format_func=lambda x: DISPLAY_NAME.get(x, x),
+                key="trend_selected",
+            )
+            trend_columns = st.columns(2)
+            plot_data = visible.tail(120)
+            use_depth = has_depth and "Depth_m" in plot_data.columns and bool(plot_data["Depth_m"].notna().all())
+            x_values = plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
+            x_label = "Kedalaman TMD (m)" if use_depth else "Waktu"
+            for position, parameter in enumerate(selected):
+                png = render_trend_png(
+                    (parameter, int(index), scenario, len(plot_data), x_label),
+                    THEME_NAME, parameter, THRESHOLDS[parameter], x_label,
+                    x_values, plot_data[parameter],
+                )
+                show_image(trend_columns[position % 2], png)
+
+        if event_col is not None:
+            with event_col:
+                st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
+                shown_events = 100
+                if events_list:
+                    st.markdown(
+                        html_table(events_list[:shown_events], ["Waktu", "Level", "Parameter"], chip_column="Level"),
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"Menampilkan {min(len(events_list), shown_events)} dari {len(events_list)} catatan terbaru.")
+                    st.download_button(
+                        "Unduh riwayat CSV",
+                        pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
+                        file_name="riwayat_ews.csv",
+                        mime="text/csv",
+                        key="ews_history_dashboard_download",
+                    )
+                else:
+                    st.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
 
 # ==========================================================
 # RIWAYAT, LOG AUDIT, CATATAN (kedua tampilan)
 # ==========================================================
-with sec_events:
-    st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
-    slot_event_table = st.empty()
-    slot_event_caption = st.empty()
-    slot_event_download = st.empty()
-    shown = 8 if cabin_view else 100
-    if events_list:
-        slot_event_table.markdown(
-            html_table(events_list[:shown], ["Waktu", "Level", "Parameter"], chip_column="Level"),
-            unsafe_allow_html=True,
-        )
-        slot_event_caption.caption(f"Menampilkan {min(len(events_list), shown)} dari {len(events_list)} catatan terbaru.")
-        slot_event_download.download_button(
-            "Unduh riwayat CSV",
-            pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
-            file_name="riwayat_ews.csv",
-            mime="text/csv",
-        )
-    else:
-        slot_event_table.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
-
+if cabin_view:
+    with sec_events:
+        st.markdown('<div class="section-title">Riwayat eskalasi EWS</div>', unsafe_allow_html=True)
+        slot_event_table = st.empty()
+        slot_event_caption = st.empty()
+        slot_event_download = st.empty()
+        shown = 8 if cabin_view else 100
+        if events_list:
+            slot_event_table.markdown(
+                html_table(events_list[:shown], ["Waktu", "Level", "Parameter"], chip_column="Level"),
+                unsafe_allow_html=True,
+            )
+            slot_event_caption.caption(f"Menampilkan {min(len(events_list), shown)} dari {len(events_list)} catatan terbaru.")
+            slot_event_download.download_button(
+                "Unduh riwayat CSV",
+                pd.DataFrame(events_list).to_csv(index=False).encode("utf-8-sig"),
+                file_name="riwayat_ews.csv",
+                mime="text/csv",
+            )
+        else:
+            slot_event_table.markdown(notice("Belum ada eskalasi alarm yang tercatat."), unsafe_allow_html=True)
 with sec_audit:
     if is_admin and not cabin_view:
         with st.expander("Log audit (khusus admin)"):
