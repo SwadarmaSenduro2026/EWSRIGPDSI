@@ -5,3 +5,4 @@ numpy
 openpyxl
 requests
 streamlit-autorefresh
+plotly>=5.18,<7
