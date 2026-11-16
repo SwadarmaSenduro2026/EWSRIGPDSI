@@ -9,7 +9,8 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from matplotlib.figure import Figure  # tanpa pyplot: aman untuk banyak perangkat sekaligus
+from matplotlib.figure import Figure  # grafik PNG lama tetap tersedia sebagai fallback
+import plotly.graph_objects as go  # grafik Plotly stabil saat Streamlit autorefresh
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -501,11 +502,6 @@ CABIN_CSS = """
 .gauge .g-value{font-size:28px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--text)}
 .gauge .g-unit{font-size:12px;font-weight:600;color:var(--muted);margin-left:4px}
 .gauge .g-sub{font-size:11px;color:var(--muted);margin-top:4px}
-.gauge .g-equiv{font-size:12px;font-weight:700;color:var(--accent);margin-top:3px}
-.gauge .g-direction{display:flex;justify-content:space-between;gap:6px;font-size:10px;color:var(--muted);margin:-3px 0 6px}
-.gauge .g-perf{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.35}
-.card .rop-equiv{font-size:12px;color:var(--accent);font-weight:700;margin-top:2px}
-.card .rop-perf{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.3}
 .annun{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
 .lamp{padding:10px 6px;border-radius:4px;text-align:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--border);background:var(--surface2);color:var(--muted);min-width:0}
 .lamp.ok{border-color:var(--lv0);color:var(--lv0);background:var(--surface)}
@@ -2127,16 +2123,12 @@ def render_trend_png(cache_key, theme, parameter, limits, x_label, _x, _values):
     name = DISPLAY_NAME.get(parameter, parameter)
     ax.plot(_x, to_field(parameter, _values), color=pal["accent"], linewidth=1.8, label=name)
     shown_limits = display_limits(parameter, limits)
-    legend_tag = "Ambang EWS " if parameter == "ROP" else ""
-    ax.axhline(shown_limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label=legend_tag + "Kuning")
-    ax.axhline(shown_limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label=legend_tag + "Merah")
-    ax.axhline(shown_limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label=legend_tag + "Magenta")
+    ax.axhline(shown_limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label="Kuning")
+    ax.axhline(shown_limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label="Merah")
+    ax.axhline(shown_limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label="Magenta")
     ax.set_ylabel(UNITS[parameter], fontsize=9)
     ax.set_xlabel(x_label, fontsize=8)
-    ax.set_title(
-        "Tren ROP inverse (kecil = cepat, besar = lambat)" if parameter == "ROP"
-        else f"Tren {name}", fontsize=11, loc="left"
-    )
+    ax.set_title(f"Tren {name}", fontsize=11, loc="left")
     ax.legend(
         fontsize=7, facecolor=pal["surface"], edgecolor=pal["border"],
         labelcolor=pal["text"], loc="upper left",
@@ -2206,6 +2198,141 @@ def render_ap_png(cache_key, theme, show_raw, nominal, x_label, _hist):
 
 
 # ==========================================================
+# GRAFIK INTERAKTIF STABIL (DASBOR EWS)
+# Tidak memakai PNG/st.image yang memuat ulang gambar setiap autorefresh.
+# Plotly dengan key tetap mempertahankan elemen chart di browser.
+# Maksimal 650 sampel terbaru ditampilkan; data lengkap tetap ada untuk KPI.
+# ==========================================================
+EWS_CHART_MAX_POINTS = 650
+
+
+def _ews_plotly_layout(fig, theme, title, yaxis_title, xaxis_title, height):
+    pal = PALETTES.get(theme, PALETTES["dark"])
+    fig.update_layout(
+        template="none",
+        title=dict(text=title, x=0, xanchor="left", font=dict(size=14, color=pal["text"])),
+        height=height,
+        autosize=True,
+        paper_bgcolor=pal["surface"],
+        plot_bgcolor=pal["surface"],
+        font=dict(family="Arial, sans-serif", size=11, color=pal["text"]),
+        margin=dict(l=62, r=26, t=60, b=98 if height > 300 else 64),
+        legend=dict(orientation="h", yanchor="top", y=-0.20,
+                    xanchor="left", x=0, font=dict(size=10),
+                    bgcolor=pal["surface"]),
+        uirevision="ews-neac001-chart-view-v1",
+    )
+    fig.update_xaxes(title_text=xaxis_title, showgrid=True,
+                     gridcolor=pal["chart_grid"], zeroline=False,
+                     linecolor=pal["border"])
+    fig.update_yaxes(title_text=yaxis_title, showgrid=True,
+                     gridcolor=pal["chart_grid"], zeroline=False,
+                     linecolor=pal["border"])
+    return fig
+
+
+def render_ap_plotly_stabil(theme, show_raw, nominal, x_label, hist):
+    """Garis tebal hasil Fuzzy-PID, garis samar data rig; tanpa PNG berkedip.
+
+    Hanya membatasi titik yang *digambar* agar refresh tetap ringan; riwayat
+    lengkap tidak diubah dan tetap digunakan pada tabel evaluasi.
+    """
+    fig = go.Figure()
+    if not hist or not hist.get("t"):
+        fig = _ews_plotly_layout(fig, theme, "Auto Pilot Fuzzy-PID", "%", "Sampel", 385)
+        fig.add_annotation(text="Belum ada riwayat Auto-Pilot. Aktifkan mode Auto-Pilot untuk menampilkan grafik.",
+                           x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False)
+        return fig
+
+    n = len(hist["t"])
+    start = max(0, n - EWS_CHART_MAX_POINTS)
+    if x_label == "Kedalaman TMD (m)":
+        x = np.asarray(hist["depth"][start:n], dtype=float)
+    else:
+        x = pd.to_datetime(hist["t"][start:n])
+
+    ap_max = 100.0
+    raw_peaks = []
+    for name in AP_CHANNEL_LIST:
+        scale = max(float(to_field(name, nominal[name])), 1e-9)
+        actual = to_field(name, np.asarray(hist[f"ap_{name}"][start:n], dtype=float)) / scale * 100.0
+        finite_actual = actual[np.isfinite(actual)]
+        if finite_actual.size:
+            ap_max = max(ap_max, float(np.max(finite_actual)))
+        if show_raw:
+            raw = to_field(name, np.asarray(hist[f"raw_{name}"][start:n], dtype=float)) / scale * 100.0
+            finite_raw = raw[np.isfinite(raw)]
+            if finite_raw.size:
+                raw_peaks.append(float(np.percentile(finite_raw, 99)))
+            fig.add_trace(go.Scattergl(
+                x=x, y=raw, mode="lines", line=dict(color=AP_COLORS[name], width=1),
+                opacity=0.27, showlegend=False, hoverinfo="skip", name=f"Rig mentah {name}",
+            ))
+        fig.add_trace(go.Scattergl(
+            x=x, y=actual, mode="lines", line=dict(color=AP_COLORS[name], width=2.4),
+            name=f"{DISPLAY_NAME.get(name, name)} ({UNITS[name]})",
+            hovertemplate="%{x}<br>%{y:.1f}% dari acuan<extra>%{fullData.name}</extra>",
+        ))
+
+    brake = np.asarray(hist["brake"][start:n], dtype=float)
+    if np.any(brake > 0.10):
+        # Pengereman ditunjukkan dengan garis penanda tipis, tanpa membangun
+        # ulang latar setiap refresh. Ini tidak memengaruhi angka pengendali.
+        fig.add_trace(go.Scattergl(
+            x=x, y=np.where(brake > 0.10, 0.0, np.nan), mode="markers",
+            marker=dict(color="#D32F2F", size=4),
+            name="Pengereman aktif", showlegend=True,
+            hovertemplate="Pengereman aktif<extra></extra>",
+        ))
+
+    fig = _ews_plotly_layout(
+        fig, theme, "Hasil Auto-Pilot Fuzzy-PID vs Data Mentah Rig",
+        "Persen terhadap nilai acuan (%)", x_label, 395,
+    )
+    ymax = max(130.0, ap_max * 1.12)
+    if raw_peaks:
+        ymax = min(max(ymax, max(raw_peaks) * 1.05), 450.0)
+    fig.update_yaxes(range=[0, ymax])
+    fig.add_hline(y=100.0, line_dash="dot", line_color=PALETTES.get(theme, PAL)["muted"], line_width=1)
+    return fig
+
+
+def render_ews_trend_plotly(theme, parameter, limits, x_label, x_values, values):
+    """Tren EWS dengan identitas elemen tetap; tidak memakai st.image/PNG."""
+    pal = PALETTES.get(theme, PALETTES["dark"])
+    shown = to_field(parameter, np.asarray(values, dtype=float))
+    fig = go.Figure()
+    fig.add_trace(go.Scattergl(
+        x=x_values, y=shown, mode="lines",
+        line=dict(color=pal["accent"], width=2),
+        name=DISPLAY_NAME.get(parameter, parameter),
+        hovertemplate="%{x}<br>%{y:.2f} " + UNITS[parameter] + "<extra></extra>",
+    ))
+    shown_limits = display_limits(parameter, limits)
+    for key, title, color in (
+        ("yellow", "Kuning", "#D9A400"),
+        ("red", "Merah", "#D32F2F"),
+        ("magenta", "Magenta", "#B0158F"),
+    ):
+        fig.add_hline(y=float(shown_limits[key]), line_dash="dash",
+                      line_color=color, line_width=1,
+                      annotation_text=None)
+    fig = _ews_plotly_layout(fig, theme, f"Tren {DISPLAY_NAME.get(parameter, parameter)}",
+                             UNITS[parameter], x_label, 290)
+    fig.update_layout(margin=dict(l=58, r=16, t=55, b=45), showlegend=False)
+    return fig
+
+
+def show_ews_chart(target, fig, key):
+    """Grafik native dengan key stabil; komponen tidak dibuang saat refresh."""
+    config = {"displayModeBar": False, "responsive": True, "scrollZoom": False}
+    try:
+        return target.plotly_chart(fig, key=key, config=config, width="stretch")
+    except TypeError:
+        return target.plotly_chart(fig, key=key, config=config, use_container_width=True)
+
+
+# ==========================================================
 # KOMPONEN KABIN DRILLER (SVG/HTML murni, ringan dan ikut tema)
 # ==========================================================
 def _arc(cx, cy, r, f0, f1):
@@ -2215,44 +2342,17 @@ def _arc(cx, cy, r, f0, f1):
     return f"M{x0:.2f} {y0:.2f} A{r} {r} 0 0 1 {x1:.2f} {y1:.2f}"
 
 
-def rop_penetration_trend(rop_now_mh, previous_rop_mh, window=30):
-    """Indikator laju relatif, bukan efisiensi energi, litologi, atau status keselamatan.
-
-    Bandingkan ROP saat ini dengan median maksimum `window` sampel SEBELUMNYA.
-    Keputusan ini hanya dipakai untuk penjelasan HMI, bukan masukan Fuzzy-PID.
-    """
-    try:
-        current = float(rop_now_mh)
-        past = np.asarray(previous_rop_mh if previous_rop_mh is not None else [], dtype=float).ravel()
-        past = past[-int(window):]
-        past = past[np.isfinite(past) & (past > 0)]
-        if not (np.isfinite(current) and current > 0) or len(past) < 5:
-            return "Tren ROP: data pembanding belum cukup"
-        median = float(np.median(past))
-        if median <= 0:
-            return "Tren ROP: data pembanding belum cukup"
-        ratio = current / median
-        if ratio >= 1.10:
-            status = "Lebih cepat dari tren"
-        elif ratio <= 0.90:
-            status = "Lebih lambat dari tren"
-        else:
-            status = "Sejalan dengan tren"
-        return f"Tren ROP: {status} (median {len(past)} sampel sebelumnya)"
-    except (TypeError, ValueError, OverflowError):
-        return "Tren ROP: data pembanding belum cukup"
-
-
-def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, ref_value=None, raw_value=None, rop_history=None):
+def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, ref_value=None, raw_value=None):
     """Satu gauge setengah lingkaran dengan zona hijau/kuning/merah/magenta."""
     name = SHORT_NAME[parameter]
     decimals = DECIMALS[parameter]
     css = "lverr" if bad else f"lv{level}"
-    # ROP inverse: makin kecil min/m, makin cepat penetrasi.
-    # Skala performa pada busur HARUS terpisah dari status EWS keselamatan.
+    # Semua koordinat jarum/ambang menggunakan satuan aslinya.
+    # ROP inverse: semakin kecil min/m, semakin cepat penetrasi. Karena
+    # ambang EWS awal berbasis ROP tinggi (m/h), zona dibalik secara geometris.
     shown_limits = display_limits(parameter, limits)
     if parameter == "ROP":
-        vmax = max(shown_limits["yellow"] * 3.0, 5.0)
+        vmax = max(shown_limits["yellow"] * 2.0, 0.1)
     else:
         vmax = float(shown_limits["magenta"]) * 1.2
     cx, cy, radius = 100.0, 100.0, 78.0
@@ -2261,8 +2361,12 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
         return min(max(float(v) / vmax, 0.0), 1.0)
 
     if parameter == "ROP":
-        # Busur NETRAL. Jangan menyamakan ROP cepat/lambat dengan alarm keselamatan.
-        zones = [(0.0, 1.0, "var(--muted)")]
+        zones = [
+            (0.0, frac(shown_limits["magenta"]), "var(--lv3)"),
+            (frac(shown_limits["magenta"]), frac(shown_limits["red"]), "var(--lv2)"),
+            (frac(shown_limits["red"]), frac(shown_limits["yellow"]), "var(--lv1)"),
+            (frac(shown_limits["yellow"]), 1.0, "var(--lv0)"),
+        ]
     else:
         zones = [
             (0.0, frac(shown_limits["yellow"]), "var(--lv0)"),
@@ -2328,22 +2432,6 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
         + "</svg>"
     )
     chip_text = "SENSOR ERROR" if bad else LEVELS[level]["name"]
-    if parameter == "ROP":
-        # Status EWS tetap mengikuti aturan alarm asli, namun diberi label terpisah.
-        direction = '<div class="g-direction"><span>← Lebih cepat</span><span>Lebih lambat →</span></div>'
-        equivalent = (
-            f'<div class="g-equiv">Setara {_num(value, 2)} m/h</div>'
-            if not bad and value is not None and np.isfinite(float(value))
-            else '<div class="g-equiv">Setara - m/h</div>'
-        )
-        trend = rop_penetration_trend(value, rop_history) if not bad else "Tren ROP: sensor tidak valid"
-        return (
-            f'<div class="gauge {css}"><div class="g-label">ROP inverse</div>{svg}'
-            f'{direction}<div class="g-value">{shown}<span class="g-unit">min/m</span></div>'
-            f'{equivalent}<div class="chip {css}">EWS: {chip_text}</div>'
-            f'<div class="g-perf">{html.escape(trend)}</div>'
-            f'<div class="g-sub">{rate_text}</div></div>'
-        )
     return (
         f'<div class="gauge {css}"><div class="g-label">{name}</div>{svg}'
         f'<div class="g-value">{shown}<span class="g-unit">{UNITS[parameter]}</span></div>'
@@ -2406,16 +2494,9 @@ def strip_html(parameter, raw_values, ap_values, limits, css, ref_values=None, p
     if ap_arr is not None:
         body += polyline(ap_arr, "var(--accent)", 2.4 if primary_ap else 2.2, 1)
     svg = f'<svg viewBox="0 0 {width:.0f} {height:.0f}" preserveAspectRatio="none">{body}</svg>'
-    rop_note = ""
-    if parameter == "ROP" and len(shown_series):
-        mh = float(np.asarray(raw_values if not primary_ap or ap_values is None else ap_values)[-1])
-        if np.isfinite(mh) and mh > 0:
-            # `shown_series` telah dikonversi ke min/m; kembalikan untuk ekuivalensi.
-            equiv = 60.0 / mh
-            rop_note = f'<div class="g-sub">Setara {equiv:.2f} m/h &middot; kecil = cepat</div>'
     return (
         f'<div class="strip {css}"><div class="s-head"><span class="s-name">{name}</span>'
-        f'<span class="s-val">{last} {UNITS[parameter]}</span></div>{svg}{rop_note}</div>'
+        f'<span class="s-val">{last} {UNITS[parameter]}</span></div>{svg}</div>'
     )
 
 
@@ -2803,7 +2884,6 @@ def rig_autopilot_gauges_markup(ap_view, params):
         gauges.append(gauge_html(
             parameter, ap_value, thresholds[parameter], level,
             False, subtitle, None, ref_now.get(parameter), raw_value,
-            hist["ap_ROP"][-31:-1] if parameter == "ROP" else None,
         ))
     legend = (
         '<div class="rig-gauge-legend">'
@@ -2817,7 +2897,7 @@ def rig_autopilot_gauges_markup(ap_view, params):
     )
 
 
-def rig_ews_telemetry_markup(latest, snap, visible):
+def rig_ews_telemetry_markup(latest, snap):
     """Kartu monitoring EWS yang semula di bawah rig, kini berada di kolom kanannya."""
     params = snap["params"]
     thresholds = params["thresholds"]
@@ -2844,25 +2924,10 @@ def rig_ews_telemetry_markup(latest, snap, visible):
                 else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
             )
             rate_html = f'<div class="card-rate">Laju {field_roc(parameter, rates[parameter]):+.2f} {UNITS[parameter]}/mnt {roc_chip}</div>'
-        rop_details = ""
-        if parameter == "ROP":
-            if parameter in bad_sensors:
-                rop_details = '<div class="rop-equiv">Setara - m/h</div>'
-                rop_trend = "Tren ROP: sensor tidak valid"
-            else:
-                rop_details = f'<div class="rop-equiv">Setara {_num(latest[parameter], 2)} m/h</div>'
-                history = visible["ROP"].iloc[max(0, len(visible) - 31):-1].to_numpy(dtype=float)
-                rop_trend = rop_penetration_trend(latest[parameter], history)
-            rop_details += f'<div class="rop-perf">{html.escape(rop_trend)} &middot; kecil = cepat, besar = lambat</div>'
-            chip = (
-                '<div class="chip lverr">EWS: Sensor error</div>'
-                if parameter in bad_sensors else
-                f'<div class="chip {css}">EWS: {LEVELS[signal_levels.get(parameter, 0)]["name"]}</div>'
-            )
         cards.append(
             f'<div class="card {css}"><div class="card-label">{name}</div>'
             f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
-            f"{rop_details}{chip}{rate_html}</div>"
+            f"{chip}{rate_html}</div>"
         )
     return (
         '<div class="rig-card rig-telemetry-card"><div class="rig-k">Monitoring telemetri</div>'
@@ -2981,7 +3046,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
     if view == "Kabin Auto Pilot":
         right_panel = rig_autopilot_gauges_markup(ap_view, params)
     else:
-        right_panel = rig_ews_telemetry_markup(latest, ews_snapshot, visible) if ews_snapshot else ""
+        right_panel = rig_ews_telemetry_markup(latest, ews_snapshot) if ews_snapshot else ""
 
     # Formasi selalu berada di atas panel khusus mode. Tabel lama tetap tersedia
     # tetapi dipindahkan sesudah grid agar tidak mengosongkan atau memperpanjang sisi rig.
@@ -3609,7 +3674,6 @@ if view_raw:
                     bad,
                     rate_text,
                     ap_last[parameter] if (ap_last and ap_on) else None,
-                    rop_history=visible["ROP"].iloc[max(0, len(visible) - 31):-1].to_numpy(dtype=float) if parameter == "ROP" else None,
                 )
             )
         slot_gauges.markdown(_h('<div class="cabin-gauges">' + "".join(gauges) + "</div>"), unsafe_allow_html=True)
@@ -3682,7 +3746,7 @@ if view_raw:
                              brake_css, "Direm" if brake_now >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake_now * 100:.0f}", "%", brake_css, brake_text),
                 ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
-                             "Rata-rata 30 langkah", f"Setara {rop_ap:.2f} m/h &middot; mentah {to_field('ROP', rop_raw):.2f} min/m &middot; selisih ROP {rop_gain:+.0f}%"),
+                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
             ]
             extra = ""
             if brake_now >= 0.10:
@@ -3856,7 +3920,7 @@ if view_ap:
                 ),
                 cmd_card_html(
                     "ROP inverse hasil auto pilot", field_text("ROP", ap_now["ROP"], 2), "min/m", "lv0",
-                    f"Setara {ap_now['ROP']:.2f} m/h &middot; target {to_field('ROP', chosen_sp['ROP']):.2f} min/m &middot; mentah {to_field('ROP', raw_now['ROP']):.2f} min/m",
+                    f"Target {to_field('ROP', chosen_sp['ROP']):.2f} min/m &middot; mentah {to_field('ROP', raw_now['ROP']):.2f} min/m",
                 ),
                 cmd_card_html(
                     "Gain fuzzy kanal WOB", f"Kp {gains['WOB'][0]:.3f}", "", "lv0",
@@ -3980,7 +4044,7 @@ if not cabin_view:
                              brake_css, "Direm" if brake >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake * 100:.0f}", "%", brake_css, brake_text),
                 ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
-                             "Rata-rata 30 langkah", f"Setara {rop_ap:.2f} m/h &middot; mentah {to_field('ROP', rop_raw):.2f} min/m &middot; selisih ROP {rop_gain:+.0f}%"),
+                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
             ]
             slot_cards.markdown(
                 _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
@@ -4006,12 +4070,10 @@ if not cabin_view:
             }
             depth_arr = series("depth")
             ap_x_label = "Kedalaman TMD (m)" if np.all(np.isfinite(depth_arr)) else "Waktu"
-            ap_key = (
-                int(ap_view["uid"]), len(hist["t"]), int(hist["idx"][-1]),
-                bool(show_raw), ap_x_label,
-            )
-            png = render_ap_png(ap_key, THEME_NAME, bool(show_raw), nominal, ap_x_label, hist)
-            show_image(slot_chart, png)
+            # Grafik Plotly tetap pada posisi/key yang sama saat st_autorefresh.
+            # Tidak lagi memuat PNG baru yang dapat berkedip/hilang.
+            chart_fig = render_ap_plotly_stabil(THEME_NAME, bool(show_raw), nominal, ap_x_label, hist)
+            show_ews_chart(slot_chart, chart_fig, key="ews_ap_chart_stabil")
 
             slot_caption.caption(
                 "100% adalah nilai acuan: setpoint auto pilot untuk WOB, RPM, dan ROP, serta "
@@ -4066,6 +4128,10 @@ if not cabin_view:
                   "berdasarkan besar galat dan laju perubahan galat.</div>",
                 unsafe_allow_html=True,
             )
+        else:
+            # Jaga ukuran dan identitas panel saat auto pilot belum diaktifkan.
+            empty_fig = render_ap_plotly_stabil(THEME_NAME, bool(show_raw), {}, "Sampel", None)
+            show_ews_chart(slot_chart, empty_fig, key="ews_ap_chart_stabil")
 
     # ---- legenda ----
     with sec_legend:
@@ -4084,8 +4150,8 @@ if not cabin_view:
     with sec_trend:
         st.markdown('<div class="section-title">Grafik tren parameter</div>', unsafe_allow_html=True)
         st.caption(
-            "Grafik menampilkan maksimal 120 sampel terbaru. Gambar dibuat satu kali per langkah "
-            "data dan dipakai bersama semua perangkat, sehingga tidak berkedip."
+            "Grafik menampilkan maksimal 120 sampel terbaru. Grafik interaktif diperbarui "
+            "dengan identitas tetap (tanpa membuat ulang gambar PNG) saat playback berjalan."
         )
         selected = st.multiselect(
             "Pilih parameter yang ditampilkan (lebih sedikit grafik = lebih ringan)",
@@ -4100,12 +4166,12 @@ if not cabin_view:
         x_values = plot_data["Depth_m"] if use_depth else plot_data["timestamp"]
         x_label = "Kedalaman TMD (m)" if use_depth else "Waktu"
         for position, parameter in enumerate(selected):
-            png = render_trend_png(
-                (parameter, int(index), scenario, len(plot_data), x_label),
+            trend_fig = render_ews_trend_plotly(
                 THEME_NAME, parameter, THRESHOLDS[parameter], x_label,
                 x_values, plot_data[parameter],
             )
-            show_image(trend_columns[position % 2], png)
+            show_ews_chart(trend_columns[position % 2], trend_fig,
+                           key=f"ews_trend_stabil_{parameter}")
 
 # ==========================================================
 # RIWAYAT, LOG AUDIT, CATATAN (kedua tampilan)
