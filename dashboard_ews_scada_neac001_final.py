@@ -270,6 +270,8 @@ DEFAULT_PARAMS = {
     # auto pilot Fuzzy-PID
     "autopilot": False,
     "ap_manual_setpoint": False,  # OFF = Full Auto: supervisor fuzzy menentukan target sendiri
+    "ap_constraint_enabled": True,   # ON = semua output model dibatasi < ambang kuning demonstrasi
+    "ap_constraint_margin_pct": 3.0, # margin untuk pengujian; bukan batas operasi tersertifikasi
     "ap_wob_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_wob_sp"],
     "ap_rpm_sp": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rpm_sp"],
     "ap_rop_target": SCENARIO_PRESETS[DEFAULT_SCENARIO]["ap_rop_target"],
@@ -298,6 +300,8 @@ PARAM_LABELS = {
     "wa_min_level": "Level minimum WhatsApp",
     "autopilot": "Mode auto pilot (Fuzzy-PID)",
     "ap_manual_setpoint": "Aktifkan pengaturan setpoint manual",
+    "ap_constraint_enabled": "Pembatas simulasi sebelum ambang kuning",
+    "ap_constraint_margin_pct": "Margin pembatas simulasi (%)",
     "ap_wob_sp": "Auto pilot: setpoint WOB (klb)",
     "ap_rpm_sp": "Auto pilot: setpoint RPM",
     "ap_rop_target": "Auto pilot: target ROP inverse (min/m)",
@@ -347,7 +351,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v10-neac001-field-units-2616"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v11-neac001-ap-demo-constraint-yellow"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -1400,12 +1404,45 @@ def fuzzy_gain_adjust(e_norm, de_norm):
     return num[0] / den, num[1] / den, num[2] / den
 
 
+def ap_demo_caps(params):
+    """Batas atas *SIMULASI* untuk lima output, memakai threshold kuning EWS.
+
+    Batas EWS ini berasal dari statistik data, bukan operasi aman rig.
+    ROP memakai m/h di engine; di UI nilai inverse min/m tampak lebih BESAR
+    dari 60/batas jika laju penetrasi diperlambat.
+    """
+    if not bool(params.get("ap_constraint_enabled", True)):
+        return {}
+    margin = _clip(float(params.get("ap_constraint_margin_pct", 3.0)), 0.5, 15.0) / 100.0
+    caps = {}
+    for name in AP_CHANNELS:
+        threshold = float(params["thresholds"][name]["yellow"])
+        if not (np.isfinite(threshold) and threshold > 0.0):
+            continue
+        caps[name] = threshold * (1.0 - margin)
+    return caps
+
+
+def ap_cap_value(name, value, caps, events, where):
+    """Catat intervensi sebelum membatasi rekomendasi/keluaran simulasi."""
+    upper = caps.get(name)
+    v = float(value)
+    if upper is not None and v > upper:
+        events.append(f"{SHORT_NAME.get(name, name)} ({where})")
+        return upper
+    return v
+
+
 def new_channel(value):
     return {"y": float(value), "e1": 0.0, "I": 0.0, "dy": 0.0, "kp": 0.0, "ki": 0.0, "kd": 0.0}
 
 
-def fpid_step(channel, name, ref, nominal):
-    """Satu langkah PID yang gain-nya di-tuning fuzzy; mengembalikan keluaran halus."""
+def fpid_step(channel, name, ref, nominal, upper_limit=None):
+    """PID fuzzy asal + saturasi output simulasi dan anti-windup kondisional.
+
+    upper_limit hanya berlaku untuk demonstrasi, tidak mengubah aturan fuzzy
+    atau penguatan Kp/Ki/Kd. Tanpa pembatas perilaku fungsi tetap seperti awal.
+    """
     kp0, ki0, kd0, rate = AP_BASE_GAINS[name]
     nominal = max(abs(nominal), 1e-6)
     e = ref - channel["y"]
@@ -1413,12 +1450,28 @@ def fpid_step(channel, name, ref, nominal):
     d_kp, d_ki, d_kd = fuzzy_gain_adjust(e / (0.15 * nominal), de / (0.05 * nominal))
     kp, ki, kd = kp0 * (1 + d_kp), ki0 * (1 + d_ki), kd0 * (1 + d_kd)
 
+    integral_before = channel["I"]
     channel["I"] = _clip(channel["I"] + e, -3.0 * nominal, 3.0 * nominal)
     du = kp * e + ki * channel["I"] - kd * channel["dy"]
     du = _clip(du, -rate * nominal, rate * nominal)
 
-    channel["y"] += du
-    channel["dy"] = du
+    candidate = channel["y"] + du
+    channel["limit_active"] = bool(upper_limit is not None and candidate > upper_limit)
+    if channel["limit_active"]:
+        # Anti-windup: cegah integral makin menumpuk ketika output terbentur batas.
+        if e > 0.0:
+            channel["I"] = integral_before
+        candidate = float(upper_limit)
+    if upper_limit is not None and candidate < 1e-6:
+        # Batas bawah numerik saja: hindari keluaran negatif/tidak bermakna.
+        # Bukan lower safety envelope yang tervalidasi.
+        channel["limit_active"] = True
+        if e < 0.0:
+            channel["I"] = integral_before
+        candidate = 1e-6
+    actual_du = candidate - channel["y"]
+    channel["y"] = candidate
+    channel["dy"] = actual_du
     channel["e1"] = e
     channel["kp"], channel["ki"], channel["kd"] = kp, ki, kd
     return channel["y"]
@@ -1531,6 +1584,10 @@ def effective_ap_setpoints(params, ap_view=None):
 
 def ap_new(row, params):
     raw = {p: float(row[p]) for p in AP_CHANNELS}
+    caps = ap_demo_caps(params)
+    startup_limited = [name for name in AP_CHANNELS if name in caps and raw[name] > caps[name]]
+    # Inisialisasi state numerik yang dibatasi; telemetri mentah asli tetap utuh.
+    initial_state = {name: min(raw[name], caps.get(name, float('inf'))) for name in AP_CHANNELS}
     k0 = raw["ROP"] / max(raw["WOB"] ** AP_A_ROP * raw["RPM"] ** AP_B_ROP, 1e-6)
     ct0 = raw["Torque"] / max(raw["WOB"] * raw["RPM"] ** AP_C_TORQUE, 1e-6)
     return {
@@ -1543,10 +1600,16 @@ def ap_new(row, params):
         "auto_targets": {"WOB": raw["WOB"], "RPM": raw["RPM"], "ROP": raw["ROP"]},
         "auto_reason": "Menunggu data", "auto_recent": {p: [] for p in ("ROP", "WOB", "RPM", "Torque", "StandpipePressure")},
         "rise_t": 0.0, "rise_p": 0.0,
-        "ch": {p: new_channel(raw[p]) for p in AP_CHANNELS},
+        "ch": {p: new_channel(initial_state[p]) for p in AP_CHANNELS},
+        "constraint_total": len(startup_limited),
+        "constraint_samples": 0,
+        "constraint_startup": list(startup_limited),
+        "constraint_last": [],
+        "constraint_on": bool(caps),
         "hist": {k: [] for k in (
             "t", "idx", "depth", "brake", "boost", "wob_cmd", "rpm_cmd",
             "auto_sp_WOB", "auto_sp_RPM", "auto_sp_ROP",
+            "constraint_active", "constraint_hits", "constraint_wob_target_before", "constraint_wob_ref_before",
             *[f"raw_{p}" for p in AP_CHANNELS], *[f"ap_{p}" for p in AP_CHANNELS],
         )},
         "last_index": None,
@@ -1614,6 +1677,13 @@ def ap_step(ap, row, params, index, timestamp):
         ap["auto_reason"] = "Target ditentukan dari pengaturan manual"
     else:
         targets = fuzzy_auto_setpoint(ap, raw)
+    caps = ap_demo_caps(params)
+    constraint_events = []
+    wob_target_before = float(targets["WOB"])
+    targets = {p: ap_cap_value(p, val, caps, constraint_events, "setpoint")
+               for p, val in targets.items()}
+    # Setelah filter, simpan referensi yang benar-benar diterapkan pada simulator.
+    ap["auto_targets"] = dict(targets)
     base_wob, base_rpm, target_rop = targets["WOB"], targets["RPM"], targets["ROP"]
 
     # --- booster ROP: naikkan WOB bila ROP di bawah target dan risiko rendah ---
@@ -1625,12 +1695,17 @@ def ap_step(ap, row, params, index, timestamp):
     ap["boost"] += _clip(boost_target - ap["boost"], -0.004, 0.004)
 
     b = ap["brake"]
-    wob_ref = base_wob * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
-    rpm_ref = base_rpm * (1.0 - 0.7 * b)
+    wob_ref_before = base_wob * (1.0 + ap["boost"]) * (1.0 - 0.5 * b)
+    wob_ref = ap_cap_value("WOB", wob_ref_before, caps, constraint_events, "boost/command")
+    rpm_ref = ap_cap_value("RPM", base_rpm * (1.0 - 0.7 * b), caps,
+                           constraint_events, "command")
 
     ch = ap["ch"]
-    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, base_wob)
-    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, base_rpm)
+    wob_y = fpid_step(ch["WOB"], "WOB", wob_ref, base_wob, caps.get("WOB"))
+    rpm_y = fpid_step(ch["RPM"], "RPM", rpm_ref, base_rpm, caps.get("RPM"))
+    for name in ("WOB", "RPM"):
+        if ch[name].get("limit_active", False):
+            constraint_events.append(f"{SHORT_NAME.get(name, name)} (respons PID)")
 
     rop_model = ap["K"] * max(wob_y, 1e-6) ** AP_A_ROP * max(rpm_y, 1e-6) ** AP_B_ROP
     wob_ratio = _clip(max(wob_y, 1e-6) / max(ap["wob_slow"], 1e-6), 0.4, 1.6)
@@ -1638,9 +1713,20 @@ def ap_step(ap, row, params, index, timestamp):
     torque_model = ema["Torque"] * wob_ratio ** AP_TORQUE_WOB_EXP * rpm_ratio ** AP_C_TORQUE
     ap["rop_max"] = max(ema["ROP"], ap["rop_max"] * 0.998)
     rop_model = min(rop_model, 1.15 * ap["rop_max"])   # batas kewajaran model
-    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, target_rop)
-    torque_out = fpid_step(ch["Torque"], "Torque", torque_model, ap["nom"]["Torque"])
-    spp_out = fpid_step(ch["StandpipePressure"], "StandpipePressure", ema["StandpipePressure"], ap["nom"]["StandpipePressure"])
+    rop_model = ap_cap_value("ROP", rop_model, caps, constraint_events, "model ROP")
+    torque_model = ap_cap_value("Torque", torque_model, caps, constraint_events, "model torsi")
+    spp_model = ap_cap_value("StandpipePressure", ema["StandpipePressure"], caps,
+                             constraint_events, "model SPP")
+    rop_out = fpid_step(ch["ROP"], "ROP", rop_model, target_rop, caps.get("ROP"))
+    torque_out = fpid_step(ch["Torque"], "Torque", torque_model, ap["nom"]["Torque"], caps.get("Torque"))
+    spp_out = fpid_step(ch["StandpipePressure"], "StandpipePressure", spp_model,
+                        ap["nom"]["StandpipePressure"], caps.get("StandpipePressure"))
+    for name in ("ROP", "Torque", "StandpipePressure"):
+        if ch[name].get("limit_active", False):
+            constraint_events.append(f"{SHORT_NAME.get(name, name)} (respons model)")
+    ap["constraint_last"] = list(dict.fromkeys(constraint_events))
+    ap["constraint_total"] += len(ap["constraint_last"])
+    ap["constraint_samples"] += int(bool(ap["constraint_last"]))
 
     h = ap["hist"]
     h["t"].append(timestamp); h["idx"].append(index)
@@ -1652,6 +1738,10 @@ def ap_step(ap, row, params, index, timestamp):
     h["wob_cmd"].append(wob_ref); h["rpm_cmd"].append(rpm_ref)
     h["auto_sp_WOB"].append(base_wob); h["auto_sp_RPM"].append(base_rpm)
     h["auto_sp_ROP"].append(target_rop)
+    h["constraint_active"].append(int(bool(constraint_events)))
+    h["constraint_hits"].append(len(ap["constraint_last"]))
+    h["constraint_wob_target_before"].append(wob_target_before)
+    h["constraint_wob_ref_before"].append(wob_ref_before)
     for p in AP_CHANNELS:
         h[f"raw_{p}"].append(raw[p])
     h["ap_ROP"].append(rop_out); h["ap_WOB"].append(wob_y); h["ap_Torque"].append(torque_out)
@@ -1779,6 +1869,11 @@ def process_simulation(data, ap_data=None, field_data=None, field_full=None):
                 "nom": dict(ap_state["nom"]),
                 "auto_targets": dict(ap_state["auto_targets"]),
                 "auto_reason": str(ap_state.get("auto_reason", "")),
+                "constraint_on": bool(ap_state.get("constraint_on", False)),
+                "constraint_total": int(ap_state.get("constraint_total", 0)),
+                "constraint_samples": int(ap_state.get("constraint_samples", 0)),
+                "constraint_last": list(ap_state.get("constraint_last", [])),
+                "constraint_startup": list(ap_state.get("constraint_startup", [])),
                 "uid": ap_state.get("uid", 0),
             }
         snapshot = {
@@ -1843,6 +1938,7 @@ def apply_scenario_preset():
         return
     with shared["lock"]:
         _apply_preset(shared["params"], shared["params"]["scenario"])
+        shared["state"]["ap"] = None
         _invalidate_levels()
         _touch()
         audit_log(session_user(), "PRESET SKENARIO", f"diterapkan ulang: {shared['params']['scenario']}")
@@ -1885,7 +1981,7 @@ def update_param(name, key):
         if old == new:
             return
         shared["params"][name] = new
-        if name == "ap_manual_setpoint":
+        if name in ("ap_manual_setpoint", "ap_constraint_enabled", "ap_constraint_margin_pct"):
             shared["state"]["ap"] = None  # ulang dengan state pengendali bersih
         if name in ("roc_enabled", "roc_window", "test_faulty_sensor"):
             _invalidate_levels()
@@ -1912,6 +2008,7 @@ def update_threshold(parameter, level_name, key):
         if old == new:
             return
         shared["params"]["thresholds"][parameter][level_name] = new
+        shared["state"]["ap"] = None  # batas simulator mengikuti threshold terbaru
         _invalidate_levels()
         _touch()
         audit_log(
@@ -2889,10 +2986,17 @@ def rig_autopilot_gauges_markup(ap_view, params):
             parameter, ap_value, thresholds[parameter], level,
             False, subtitle, None, ref_now.get(parameter), raw_value,
         ))
+    constraint_note = (
+        f'<div class="rig-gauge-legend"><b>Pembatas SIMULASI ON</b> &middot; '
+        f'margin {float(params.get("ap_constraint_margin_pct", 3.0)):g}% sebelum ambang kuning; '
+        'bukan jaminan aman rig.</div>'
+        if params.get("ap_constraint_enabled", True)
+        else '<div class="rig-gauge-legend"><b>Pembatas SIMULASI OFF</b> &middot; nilai dapat memasuki zona peringatan.</div>'
+    )
     legend = (
         '<div class="rig-gauge-legend">'
         'Jarum = hasil auto pilot &nbsp;|&nbsp; Belah ketupat = setpoint / perintah '
-        '&nbsp;|&nbsp; Cincin = data mentah rig</div>'
+        '&nbsp;|&nbsp; Cincin = data mentah rig</div>' + constraint_note
     )
     return (
         '<div class="rig-card rig-gauge-card"><div class="rig-k">Gauge kabin auto pilot</div>'
@@ -3203,6 +3307,8 @@ st.session_state["w_wa_enabled"] = current["wa_enabled"]
 st.session_state["w_wa_min_level"] = current["wa_min_level"]
 st.session_state["w_autopilot"] = current["autopilot"]
 st.session_state["w_ap_manual"] = bool(current.get("ap_manual_setpoint", False))
+st.session_state["w_ap_constraint"] = bool(current.get("ap_constraint_enabled", True))
+st.session_state["w_ap_constraint_margin"] = float(current.get("ap_constraint_margin_pct", 3.0))
 st.session_state["w_ap_wob"] = to_field("WOB", current["ap_wob_sp"])
 st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
 st.session_state["w_ap_rop"] = to_field("ROP", current["ap_rop_target"])
@@ -3262,6 +3368,11 @@ with st.sidebar:
         args=("ap_manual_setpoint", "w_ap_manual"),
     )
     st.toggle(
+        "Pembatas Auto-Pilot: tahan output sebelum ambang KUNING (SIMULASI)",
+        key="w_ap_constraint", disabled=locked, on_change=update_param,
+        args=("ap_constraint_enabled", "w_ap_constraint"),
+    )
+    st.toggle(
         "Aktifkan alarm suara (semua device)", key="w_alarm_enabled", disabled=locked,
         on_change=update_param, args=("alarm_enabled", "w_alarm_enabled"),
     )
@@ -3281,6 +3392,14 @@ with st.sidebar:
     components.html(controller_html(PAL), height=100)
 
     with st.expander("Pengaturan auto pilot (Fuzzy-PID)"):
+        st.number_input(
+            "Margin sebelum ambang kuning (%)", min_value=0.5, max_value=15.0,
+            step=0.5, format="%.1f", key="w_ap_constraint_margin",
+            disabled=locked or not current.get("ap_constraint_enabled", True),
+            on_change=update_param, args=("ap_constraint_margin_pct", "w_ap_constraint_margin"),
+        )
+        st.caption("Pembatas ini hanya berlaku untuk nilai hasil SIMULASI. Data rig historis & alarm EWS global "
+                   "tetap asli. Batas kuning = ambang statistik, BUKAN batas operasi aman rig.")
         if not current.get("ap_manual_setpoint", False):
             st.success("FULL AUTO FUZZY: setpoint WOB, RPM, dan target ROP dihitung oleh sistem. Input manual tidak digunakan.")
             with shared["lock"]:
@@ -3985,9 +4104,21 @@ if view_ap:
                     f"Ki {gains['WOB'][1]:.4f} &middot; Kd {gains['WOB'][2]:.3f}",
                 ),
             ]
+            _constr_on = bool(params.get("ap_constraint_enabled", True))
+            _constr_text = (
+                f'<b>PEMBATAS SIMULASI ON:</b> margin {float(params.get("ap_constraint_margin_pct", 3.0)):g}% '
+                f'sebelum kuning &middot; intervensi {ap_view.get("constraint_samples", 0)} sampel '
+                f'({ap_view.get("constraint_total", 0)} kejadian). '
+                f'<b>Terakhir:</b> {html.escape(", ".join(ap_view.get("constraint_last", [])) or "tidak ada")}. '
+                'Data mentah &amp; EWS global tidak diubah. Bukan batas aman rig.'
+                if _constr_on else
+                '<b>PEMBATAS SIMULASI OFF:</b> mode pembanding tanpa pembatas. '
+                'Hasil simulasi dapat mencapai zona kuning/merah/magenta.'
+            )
             slot_cmd.markdown(
                 _h('<div class="section-title">Perintah auto pilot dan setpoint</div>'
-                   '<div class="cmd-grid">' + "".join(cmd_cards) + "</div>"),
+                   + notice(_constr_text, "warn" if not _constr_on else "")
+                   + '<div class="cmd-grid">' + "".join(cmd_cards) + "</div>"),
                 unsafe_allow_html=True,
             )
 
@@ -4066,7 +4197,8 @@ if not cabin_view:
                 notice(
                     "Mode auto pilot <b>AKTIF</b>. "
                     + ("FULL AUTO: setpoint ditentukan Fuzzy Supervisor. " if not params.get("ap_manual_setpoint", False) else "Setpoint manual aktif. ")
-                    + "Data rig diproses Fuzzy-PID; kurva simulasi ditampilkan di bawah."
+                    + ("<b>Pembatas simulasi ON</b> sebelum ambang kuning. " if params.get("ap_constraint_enabled", True) else "Pembatas simulasi OFF. ")
+                    + "Alarm EWS global tetap membaca telemetri; kurva simulasi ada di bawah."
                 ),
                 unsafe_allow_html=True,
             )
