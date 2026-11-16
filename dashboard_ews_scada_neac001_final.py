@@ -64,12 +64,64 @@ FIELD_MAX_DEPTH_M = 200.0
 PARAMETERS = ["ROP", "WOB", "Torque", "StandpipePressure", "RPM"]
 
 UNITS = {
-    "ROP": "m/h",
-    "WOB": "kN",
-    "Torque": "kN.m",
+    "ROP": "min/m",
+    "WOB": "klb",
+    "Torque": "lbf·ft",
     "StandpipePressure": "psi",
     "RPM": "rpm",
 }
+
+# Satuan asli MLU (TAMPILAN / INPUT): ROP inverse min/m, WOB/WOH klb,
+# torque lbf·ft, SPP psi, RPM rpm, depth m.
+# Motor Fuzzy-PID, model ROP, dan MSE TETAP bekerja pada internal
+# ROP m/h, WOB kN, torque kN.m agar parameter/gain/model tidak berubah.
+KLB_TO_KN = 4.448221615
+LBFFT_TO_KNM = 0.001355817948
+
+
+def to_field(parameter, value):
+    """Ubah satuan internal menjadi satuan MLU; scalar atau array."""
+    arr = np.asarray(value, dtype=float)
+    if parameter == "ROP":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = np.where(arr > 0, 60.0 / arr, np.nan)
+    elif parameter in ("WOB", "WOH"):
+        out = arr / KLB_TO_KN
+    elif parameter == "Torque":
+        out = arr / LBFFT_TO_KNM
+    else:
+        out = arr
+    return float(out) if out.ndim == 0 else out
+
+
+def to_internal(parameter, value):
+    """Ubah input MLU menjadi basis internal yang digunakan pengendali."""
+    arr = np.asarray(value, dtype=float)
+    if parameter == "ROP":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = np.where(arr > 0, 60.0 / arr, np.nan)
+    elif parameter in ("WOB", "WOH"):
+        out = arr * KLB_TO_KN
+    elif parameter == "Torque":
+        out = arr * LBFFT_TO_KNM
+    else:
+        out = arr
+    return float(out) if out.ndim == 0 else out
+
+
+def field_roc(parameter, value):
+    """ROC input internal (ROP sudah min/m pada get_signals), hasil satuan lapangan/menit."""
+    return value if parameter == "ROP" else to_field(parameter, value)
+
+
+def display_limits(parameter, limits):
+    return {key: to_field(parameter, v) for key, v in limits.items()}
+
+
+def field_text(parameter, value, decimals=None, fallback="-"):
+    if decimals is None:
+        decimals = DECIMALS.get(parameter, 2)
+    return _num(to_field(parameter, value), decimals, fallback)
 
 # Ambang rendah khusus demonstrasi alarm (nilai awal/default).
 # JANGAN digunakan sebagai setpoint operasi nyata.
@@ -84,9 +136,9 @@ DEFAULT_THRESHOLDS = {
 }
 
 THRESHOLD_STEP = {
-    "ROP": 0.5,
-    "WOB": 1.0,
-    "Torque": 0.1,
+    "ROP": 0.05,
+    "WOB": 0.5,
+    "Torque": 100.0,
     "StandpipePressure": 50.0,
     "RPM": 1.0,
 }
@@ -97,16 +149,16 @@ LEVEL_KEYS = [("yellow", "Kuning"), ("red", "Merah"), ("magenta", "Magenta")]
 # Hanya demonstrasi; sesuaikan dengan karakter data rig yang sebenarnya.
 ROC_SUFFIX = "~laju"
 DEFAULT_ROC_THRESHOLDS = {
-    "ROP": {"yellow": 3.0, "red": 6.0},
+    "ROP": {"yellow": 1.0, "red": 2.5},
     "WOB": {"yellow": 10.0, "red": 20.0},
     "Torque": {"yellow": 1.0, "red": 2.0},
     "StandpipePressure": {"yellow": 1000.0, "red": 2000.0},
     "RPM": {"yellow": 8.0, "red": 15.0},
 }
 ROC_STEP = {
-    "ROP": 0.5,
-    "WOB": 1.0,
-    "Torque": 0.1,
+    "ROP": 0.02,
+    "WOB": 0.25,
+    "Torque": 25.0,
     "StandpipePressure": 50.0,
     "RPM": 1.0,
 }
@@ -147,7 +199,7 @@ FIELD_THRESHOLDS = {
     "RPM": {"yellow": 62.0, "red": 64.0, "magenta": 66.0},
 }
 FIELD_ROC_THRESHOLDS = {
-    "ROP": {"yellow": 1.8, "red": 2.8},
+    "ROP": {"yellow": 0.12, "red": 0.25},
     "WOB": {"yellow": 1.8, "red": 2.4},
     "Torque": {"yellow": 0.03, "red": 0.08},
     "StandpipePressure": {"yellow": 12.0, "red": 20.0},
@@ -163,7 +215,7 @@ FIELD_FULL_THRESHOLDS = {
     "RPM": {"yellow": 100.0, "red": 101.5, "magenta": 105.0},
 }
 FIELD_FULL_ROC_THRESHOLDS = {
-    "ROP": {"yellow": 1.8, "red": 2.8},
+    "ROP": {"yellow": 0.12, "red": 0.25},
     "WOB": {"yellow": 3.1, "red": 4.0},
     "Torque": {"yellow": 0.07, "red": 0.40},
     "StandpipePressure": {"yellow": 15.0, "red": 35.0},
@@ -245,9 +297,9 @@ PARAM_LABELS = {
     "wa_min_level": "Level minimum WhatsApp",
     "autopilot": "Mode auto pilot (Fuzzy-PID)",
     "ap_manual_setpoint": "Aktifkan pengaturan setpoint manual",
-    "ap_wob_sp": "Auto pilot: setpoint WOB (kN)",
+    "ap_wob_sp": "Auto pilot: setpoint WOB (klb)",
     "ap_rpm_sp": "Auto pilot: setpoint RPM",
-    "ap_rop_target": "Auto pilot: target ROP (m/h)",
+    "ap_rop_target": "Auto pilot: target ROP inverse (min/m)",
     "ap_rise_med_pct": "Auto pilot: kenaikan sedang (%)",
     "ap_rise_high_pct": "Auto pilot: kenaikan tinggi (%)",
     "bit_diameter_in": "Diameter bit (inci)",
@@ -294,7 +346,7 @@ VIBRATION_PATTERNS = {
 
 ALARM_FRESH_SECONDS = 8  # event alarm/ACK lebih lama dari ini tidak diputar ulang
 
-STATE_VERSION = "v9-neac001-full-auto-2616"  # naikkan jika struktur state bersama berubah
+STATE_VERSION = "v10-neac001-field-units-2616"  # naikkan jika struktur state bersama berubah
 
 
 
@@ -1015,7 +1067,16 @@ def get_signals(source, index, params):
                 past_value = float(past[name])
                 if np.isnan(past_value):
                     continue
-                rate = (float(row[name]) - past_value) * 60.0 / seconds
+                # ROP ditampilkan sebagai ROP inverse (min/m). Diferensiasi
+                # dilakukan SETELAH inversi (bukan membalik laju m/h secara linier).
+                if name == "ROP":
+                    now_inv = to_field("ROP", float(row[name]))
+                    past_inv = to_field("ROP", past_value)
+                    if not (np.isfinite(now_inv) and np.isfinite(past_inv)):
+                        continue
+                    rate = (now_inv - past_inv) * 60.0 / seconds
+                else:
+                    rate = (float(row[name]) - past_value) * 60.0 / seconds
                 rates[name] = rate
                 limits = params["roc_thresholds"][name]
                 signals[name + ROC_SUFFIX] = (
@@ -1190,9 +1251,9 @@ def evaluate(source, params, state, new_data, wa_cfg):
             continue
         if name.endswith(ROC_SUFFIX):
             base = name[: -len(ROC_SUFFIX)]
-            triggered.append(f"{base} laju {rates.get(base, 0):+.1f}/mnt")
+            triggered.append(f"{base} laju {float(field_roc(base, rates.get(base, 0))):+.2f} {UNITS[base]}/mnt")
         elif name in signals:
-            triggered.append(f"{name} {signals[name][0]:.1f}")
+            triggered.append(f"{name} {to_field(name, signals[name][0]):.2f} {UNITS[name]}")
 
     # Catat eskalasi
     if level > state["previous_level"] and level > 0:
@@ -1814,6 +1875,8 @@ def update_param(name, key):
     with shared["lock"]:
         old = shared["params"].get(name)
         new = st.session_state[key]
+        if name in ("ap_wob_sp", "ap_rop_target"):
+            new = to_internal("WOB" if name == "ap_wob_sp" else "ROP", new)
         if old == new:
             return
         shared["params"][name] = new
@@ -1838,7 +1901,9 @@ def update_threshold(parameter, level_name, key):
         return
     with shared["lock"]:
         old = shared["params"]["thresholds"][parameter][level_name]
-        new = float(st.session_state[key])
+        new = to_internal(parameter, float(st.session_state[key]))
+        if not np.isfinite(new) or new <= 0:
+            return
         if old == new:
             return
         shared["params"]["thresholds"][parameter][level_name] = new
@@ -1856,6 +1921,10 @@ def update_roc_threshold(parameter, level_name, key):
     with shared["lock"]:
         old = shared["params"]["roc_thresholds"][parameter][level_name]
         new = float(st.session_state[key])
+        if parameter != "ROP":
+            new = to_internal(parameter, new)
+        if not np.isfinite(new) or new <= 0:
+            return
         if old == new:
             return
         shared["params"]["roc_thresholds"][parameter][level_name] = new
@@ -1961,7 +2030,7 @@ current_user = session_user()
 
 DISPLAY_NAME = {"StandpipePressure": "Standpipe Pressure"}
 SHORT_NAME = {"ROP": "ROP", "WOB": "WOB", "Torque": "Torsi", "StandpipePressure": "SPP", "RPM": "RPM"}
-DECIMALS = {"ROP": 1, "WOB": 1, "Torque": 2, "StandpipePressure": 0, "RPM": 0}
+DECIMALS = {"ROP": 2, "WOB": 1, "Torque": 0, "StandpipePressure": 0, "RPM": 0}
 LEVEL_CLASS = {
     "HIJAU": "lv0", "KUNING": "lv1", "MERAH": "lv2", "MAGENTA": "lv3",
     "GANGGUAN DATA": "lverr", "PULIH": "lv0",
@@ -2051,10 +2120,11 @@ def render_trend_png(cache_key, theme, parameter, limits, x_label, _x, _values):
     ax = fig.subplots()
     _style_axes(fig, ax, pal)
     name = DISPLAY_NAME.get(parameter, parameter)
-    ax.plot(_x, _values, color=pal["accent"], linewidth=1.8, label=name)
-    ax.axhline(limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label="Kuning")
-    ax.axhline(limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label="Merah")
-    ax.axhline(limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label="Magenta")
+    ax.plot(_x, to_field(parameter, _values), color=pal["accent"], linewidth=1.8, label=name)
+    shown_limits = display_limits(parameter, limits)
+    ax.axhline(shown_limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label="Kuning")
+    ax.axhline(shown_limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label="Merah")
+    ax.axhline(shown_limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label="Magenta")
     ax.set_ylabel(UNITS[parameter], fontsize=9)
     ax.set_xlabel(x_label, fontsize=8)
     ax.set_title(f"Tren {name}", fontsize=11, loc="left")
@@ -2086,11 +2156,11 @@ def render_ap_png(cache_key, theme, show_raw, nominal, x_label, _hist):
     ap_max = 100.0
     raw_peaks = []
     for name in AP_CHANNEL_LIST:
-        scale = max(float(nominal[name]), 1e-9)
-        ap_line = series(f"ap_{name}") / scale * 100.0
+        scale = max(float(to_field(name, nominal[name])), 1e-9)
+        ap_line = to_field(name, series(f"ap_{name}")) / scale * 100.0
         ap_max = max(ap_max, float(np.nanmax(ap_line)))
         if show_raw:
-            raw_line = series(f"raw_{name}") / scale * 100.0
+            raw_line = to_field(name, series(f"raw_{name}")) / scale * 100.0
             raw_peaks.append(float(np.nanpercentile(raw_line, 99)))
             ax.plot(x, raw_line, color=AP_COLORS[name], alpha=0.28, linewidth=0.8)
         ax.plot(
@@ -2113,7 +2183,7 @@ def render_ap_png(cache_key, theme, show_raw, nominal, x_label, _hist):
     ax.set_ylabel("Persen terhadap nilai acuan (%)", fontsize=9)
     ax.set_xlabel(x_label, fontsize=8)
     ax.set_title(
-        "Hasil auto pilot Fuzzy-PID (garis tebal) dibanding data mentah rig (samar)",
+        "Hasil auto pilot Fuzzy-PID vs data rig (100% = acuan satuan lapangan)",
         fontsize=11, loc="left",
     )
     ax.legend(
@@ -2141,18 +2211,33 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
     name = SHORT_NAME[parameter]
     decimals = DECIMALS[parameter]
     css = "lverr" if bad else f"lv{level}"
-    vmax = float(limits["magenta"]) * 1.2
+    # Semua koordinat jarum/ambang menggunakan satuan aslinya.
+    # ROP inverse: semakin kecil min/m, semakin cepat penetrasi. Karena
+    # ambang EWS awal berbasis ROP tinggi (m/h), zona dibalik secara geometris.
+    shown_limits = display_limits(parameter, limits)
+    if parameter == "ROP":
+        vmax = max(shown_limits["yellow"] * 2.0, 0.1)
+    else:
+        vmax = float(shown_limits["magenta"]) * 1.2
     cx, cy, radius = 100.0, 100.0, 78.0
 
     def frac(v):
         return min(max(float(v) / vmax, 0.0), 1.0)
 
-    zones = [
-        (0.0, frac(limits["yellow"]), "var(--lv0)"),
-        (frac(limits["yellow"]), frac(limits["red"]), "var(--lv1)"),
-        (frac(limits["red"]), frac(limits["magenta"]), "var(--lv2)"),
-        (frac(limits["magenta"]), 1.0, "var(--lv3)"),
-    ]
+    if parameter == "ROP":
+        zones = [
+            (0.0, frac(shown_limits["magenta"]), "var(--lv3)"),
+            (frac(shown_limits["magenta"]), frac(shown_limits["red"]), "var(--lv2)"),
+            (frac(shown_limits["red"]), frac(shown_limits["yellow"]), "var(--lv1)"),
+            (frac(shown_limits["yellow"]), 1.0, "var(--lv0)"),
+        ]
+    else:
+        zones = [
+            (0.0, frac(shown_limits["yellow"]), "var(--lv0)"),
+            (frac(shown_limits["yellow"]), frac(shown_limits["red"]), "var(--lv1)"),
+            (frac(shown_limits["red"]), frac(shown_limits["magenta"]), "var(--lv2)"),
+            (frac(shown_limits["magenta"]), 1.0, "var(--lv3)"),
+        ]
     parts = [
         f'<path d="{_arc(cx, cy, radius, 0.0005, 0.9995)}" fill="none" '
         'style="stroke:var(--border)" stroke-width="15" stroke-linecap="butt"/>'
@@ -2164,21 +2249,21 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
                 f'style="stroke:{color}" stroke-width="11" stroke-linecap="butt"/>'
             )
 
-    if bad or value is None or not np.isfinite(float(value)):
+    if bad or value is None or not np.isfinite(float(to_field(parameter, value))):
         needle = ""
         shown = "-"
     else:
-        angle = math.pi * (1.0 - frac(value))
+        angle = math.pi * (1.0 - frac(to_field(parameter, value)))
         nx, ny = cx + (radius - 8) * math.cos(angle), cy - (radius - 8) * math.sin(angle)
         needle = (
             f'<line x1="{cx}" y1="{cy}" x2="{nx:.2f}" y2="{ny:.2f}" '
             'style="stroke:var(--text)" stroke-width="3.5" stroke-linecap="round"/>'
         )
-        shown = _num(value, decimals)
+        shown = field_text(parameter, value, decimals)
 
     marker = ""
     if ap_value is not None and np.isfinite(float(ap_value)) and not bad:
-        a_angle = math.pi * (1.0 - frac(ap_value))
+        a_angle = math.pi * (1.0 - frac(to_field(parameter, ap_value)))
         mx, my = cx + (radius + 1) * math.cos(a_angle), cy - (radius + 1) * math.sin(a_angle)
         marker = (
             f'<circle cx="{mx:.2f}" cy="{my:.2f}" r="5.5" style="fill:var(--accent);'
@@ -2188,14 +2273,14 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
     # penanda tambahan (kabin auto pilot): ref = setpoint/perintah (belah ketupat), raw = data mentah (cincin)
     extra = ""
     if ref_value is not None and np.isfinite(float(ref_value)) and not bad:
-        r_angle = math.pi * (1.0 - frac(ref_value))
+        r_angle = math.pi * (1.0 - frac(to_field(parameter, ref_value)))
         rx, ry = cx + (radius + 9) * math.cos(r_angle), cy - (radius + 9) * math.sin(r_angle)
         extra += (
             f'<polygon points="{rx:.2f},{ry - 5:.2f} {rx + 5:.2f},{ry:.2f} {rx:.2f},{ry + 5:.2f} {rx - 5:.2f},{ry:.2f}" '
             'style="fill:var(--text);stroke:var(--surface)" stroke-width="1.5"/>'
         )
     if raw_value is not None and np.isfinite(float(raw_value)) and not bad:
-        w_angle = math.pi * (1.0 - frac(raw_value))
+        w_angle = math.pi * (1.0 - frac(to_field(parameter, raw_value)))
         wx, wy = cx + (radius - 17) * math.cos(w_angle), cy - (radius - 17) * math.sin(w_angle)
         extra += (
             f'<circle cx="{wx:.2f}" cy="{wy:.2f}" r="4" fill="none" '
@@ -2223,7 +2308,9 @@ def strip_html(parameter, raw_values, ap_values, limits, css, ref_values=None, p
     """Grafik mini (SVG) dari sampel terbaru; garis tipis = mentah, garis tebal = auto pilot."""
     name = SHORT_NAME[parameter]
     decimals = DECIMALS[parameter]
-    raw_values = np.asarray(raw_values, dtype=float)
+    raw_values = to_field(parameter, np.asarray(raw_values, dtype=float))
+    ap_values = None if ap_values is None else to_field(parameter, np.asarray(ap_values, dtype=float))
+    ref_values = None if ref_values is None else to_field(parameter, np.asarray(ref_values, dtype=float))
     finite = raw_values[np.isfinite(raw_values)]
     shown_series = ap_values if (primary_ap and ap_values is not None) else raw_values
     last = _num(np.asarray(shown_series, dtype=float)[-1] if len(shown_series) else None, decimals)
@@ -2258,7 +2345,7 @@ def strip_html(parameter, raw_values, ap_values, limits, css, ref_values=None, p
 
     lines = []
     for key, color in (("yellow", "var(--lv1)"), ("red", "var(--lv2)"), ("magenta", "var(--lv3)")):
-        v = float(limits[key])
+        v = float(to_field(parameter, limits[key]))
         if vmin < v < vmax:
             y = height - (v - vmin) / (vmax - vmin) * (height - 6.0) - 3.0
             lines.append(
@@ -2598,13 +2685,13 @@ def rig_svg(depth_now, depth_start, scale_max, unit, segments, class_now, setpoi
     base_len = 44.0
     parts.append(_arrow_v(cx + 30, max(y_end - base_len, top_limit), y_end, True, "--text"))
     parts.append(_arrow_v(cx + 46, max(y_end - scaled(actuals["WOB"], setpoints["WOB"]), top_limit), y_end, False, "--accent"))
-    parts.append(_tag(cx + 56, y_end - 30, f"WOB SP {setpoints['WOB']:.1f}", strong=True))
-    parts.append(_tag(cx + 56, y_end - 14, f"Akt {actuals['WOB']:.1f} kN"))
+    parts.append(_tag(cx + 56, y_end - 30, f"WOB SP {to_field('WOB', setpoints['WOB']):.1f} klb", strong=True))
+    parts.append(_tag(cx + 56, y_end - 14, f"Akt {to_field('WOB', actuals['WOB']):.1f} klb"))
     # ROP: laju penetrasi
     parts.append(_arrow_v(cx - 28, max(y_end - base_len, top_limit), y_end, True, "--text"))
     parts.append(_arrow_v(cx - 44, max(y_end - scaled(actuals["ROP"], setpoints["ROP"]), top_limit), y_end, False, "--accent"))
-    parts.append(_tag(cx - 54, y_end - 30, f"ROP SP {setpoints['ROP']:.1f}", anchor="end", strong=True))
-    parts.append(_tag(cx - 54, y_end - 14, f"Akt {actuals['ROP']:.1f} m/h", anchor="end"))
+    parts.append(_tag(cx - 54, y_end - 30, f"ROP SP {to_field('ROP', setpoints['ROP']):.2f} min/m", anchor="end", strong=True))
+    parts.append(_tag(cx - 54, y_end - 14, f"Akt {to_field('ROP', actuals['ROP']):.2f} min/m", anchor="end"))
     # RPM: cincin putar di bawah top drive
     ring_y = min(block_y + 30 + 22, ground - 14)
     parts.append(_arrow_ring(cx, ring_y, 25.0, True, "--text"))
@@ -2614,7 +2701,7 @@ def rig_svg(depth_now, depth_start, scale_max, unit, segments, class_now, setpoi
     # hook load
     if woh is not None and np.isfinite(woh):
         parts.append(_arrow_v(cx + 24, block_y + 26, block_y - 12, False, "--accent"))
-        parts.append(_tag(cx + 34, block_y - 4, f"WOH {woh:.0f} kN"))
+        parts.append(_tag(cx + 34, block_y - 4, f"WOH {to_field('WOH', woh):.1f} klb"))
     # rem putaran
     if brake >= 0.10:
         parts.append(_tag(cx - 32, block_y + 14, f"REM {brake * 100:.0f}%", anchor="end", strong=True, alert=True))
@@ -2655,9 +2742,9 @@ def rig_autopilot_gauges_markup(ap_view, params):
         ap_value = float(hist[f"ap_{parameter}"][-1])
         raw_value = float(hist[f"raw_{parameter}"][-1])
         level = level_for(ap_value, thresholds[parameter])
-        subtitle = f"Mentah {raw_value:,.{decimals}f}"
+        subtitle = f"Mentah {field_text(parameter, raw_value, decimals)} {UNITS[parameter]}"
         if parameter in ref_now:
-            subtitle += f" &middot; Setpoint {ref_now[parameter]:,.{decimals}f}"
+            subtitle += f" &middot; Setpoint {field_text(parameter, ref_now[parameter], decimals)} {UNITS[parameter]}"
         gauges.append(gauge_html(
             parameter, ap_value, thresholds[parameter], level,
             False, subtitle, None, ref_now.get(parameter), raw_value,
@@ -2691,7 +2778,7 @@ def rig_ews_telemetry_markup(latest, snap):
         else:
             lv = signal_levels.get(parameter, 0)
             css = f"lv{lv}"
-            value_text = _num(latest[parameter], DECIMALS[parameter] if parameter != "StandpipePressure" else 0)
+            value_text = field_text(parameter, latest[parameter], DECIMALS[parameter])
             chip = f'<div class="chip lv{lv}">{LEVELS[lv]["name"]}</div>'
         rate_html = ""
         if parameter in rates:
@@ -2700,7 +2787,7 @@ def rig_ews_telemetry_markup(latest, snap):
                 "" if roc_lv == 0
                 else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
             )
-            rate_html = f'<div class="card-rate">Laju {rates[parameter]:+.2f} per menit {roc_chip}</div>'
+            rate_html = f'<div class="card-rate">Laju {field_roc(parameter, rates[parameter]):+.2f} {UNITS[parameter]}/mnt {roc_chip}</div>'
         cards.append(
             f'<div class="card {css}"><div class="card-label">{name}</div>'
             f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
@@ -2790,7 +2877,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
 
     # --- tabel setpoint ---
     rows = []
-    for key, label, unit_text, decimals in (("WOB", "WOB", "kN", 1), ("RPM", "RPM", "rpm", 0), ("ROP", "ROP", "m/h", 1)):
+    for key, label, unit_text, decimals in (("WOB", "WOB", "klb", 1), ("RPM", "RPM", "rpm", 0), ("ROP", "ROP inverse", "min/m", 2)):
         sp, act = setpoints[key], actuals[key]
         if key in ("WOB", "RPM") and brake >= 0.10:
             status = "DIREM"
@@ -2800,12 +2887,12 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
             status = "TERCAPAI"
         else:
             status = "NAIKKAN" if act < sp else "TURUNKAN"
-        cmd = f"{commands[key]:,.{decimals}f}" if (commands and key in commands) else "-"
+        cmd = field_text(key, commands[key], decimals) if (commands and key in commands) else "-"
         rows.append({
             "Parameter": f"{label} ({unit_text})",
-            "Setpoint": f"{sp:,.{decimals}f}",
+            "Setpoint": field_text(key, sp, decimals),
             "Perintah": cmd,
-            "Aktual": f"{act:,.{decimals}f}",
+            "Aktual": field_text(key, act, decimals),
             "Status": status,
         })
     table_card = (
@@ -2816,7 +2903,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
     stats_card = (
         '<div class="rig-stats">'
         + stat_html("Posisi bit" if unit == "m" else "Posisi relatif", _num(depth_now, 1), unit)
-        + stat_html("ROP", _num(actuals["ROP"], 1), "m/h")
+        + stat_html("ROP inverse", field_text("ROP", actuals["ROP"]), "min/m")
         + stat_html("MSE", _num(mse_now, 1), "MPa")
         + "</div>"
     )
@@ -2841,18 +2928,18 @@ def kpi_rows_from_hist(hist):
         return np.array(hist[key], dtype=float)
 
     return [
-        {"Indikator": "Fluktuasi WOB (rata-rata perubahan per langkah, kN)",
-         "Data mentah": f"{_mean_abs_change(series('raw_WOB')):.2f}",
-         "Auto pilot": f"{_mean_abs_change(series('ap_WOB')):.2f}"},
-        {"Indikator": "Fluktuasi ROP (rata-rata perubahan per langkah, m/h)",
-         "Data mentah": f"{_mean_abs_change(series('raw_ROP')):.2f}",
-         "Auto pilot": f"{_mean_abs_change(series('ap_ROP')):.2f}"},
-        {"Indikator": "ROP rata-rata (m/h)",
-         "Data mentah": f"{np.mean(series('raw_ROP')):.2f}",
-         "Auto pilot": f"{np.mean(series('ap_ROP')):.2f}"},
-        {"Indikator": "Torsi puncak (kN.m)",
-         "Data mentah": f"{np.max(series('raw_Torque')):.2f}",
-         "Auto pilot": f"{np.max(series('ap_Torque')):.2f}"},
+        {"Indikator": "Fluktuasi WOB (rata-rata perubahan per sampel, klb)",
+         "Data mentah": f"{_mean_abs_change(to_field('WOB', series('raw_WOB'))):.2f}",
+         "Auto pilot": f"{_mean_abs_change(to_field('WOB', series('ap_WOB'))):.2f}"},
+        {"Indikator": "Fluktuasi ROP inverse (rata-rata perubahan per sampel, min/m)",
+         "Data mentah": f"{_mean_abs_change(to_field('ROP', series('raw_ROP'))):.2f}",
+         "Auto pilot": f"{_mean_abs_change(to_field('ROP', series('ap_ROP'))):.2f}"},
+        {"Indikator": "ROP inverse rata-rata (min/m)",
+         "Data mentah": f"{np.mean(to_field('ROP', series('raw_ROP'))):.2f}",
+         "Auto pilot": f"{np.mean(to_field('ROP', series('ap_ROP'))):.2f}"},
+        {"Indikator": "Torsi puncak (lbf·ft)",
+         "Data mentah": f"{np.max(to_field('Torque', series('raw_Torque'))):.2f}",
+         "Auto pilot": f"{np.max(to_field('Torque', series('ap_Torque'))):.2f}"},
         {"Indikator": "Standpipe pressure puncak (psi)",
          "Data mentah": f"{np.max(series('raw_StandpipePressure')):,.0f}",
          "Auto pilot": f"{np.max(series('ap_StandpipePressure')):,.0f}"},
@@ -2976,9 +3063,9 @@ st.session_state["w_wa_enabled"] = current["wa_enabled"]
 st.session_state["w_wa_min_level"] = current["wa_min_level"]
 st.session_state["w_autopilot"] = current["autopilot"]
 st.session_state["w_ap_manual"] = bool(current.get("ap_manual_setpoint", False))
-st.session_state["w_ap_wob"] = float(current["ap_wob_sp"])
+st.session_state["w_ap_wob"] = to_field("WOB", current["ap_wob_sp"])
 st.session_state["w_ap_rpm"] = float(current["ap_rpm_sp"])
-st.session_state["w_ap_rop"] = float(current["ap_rop_target"])
+st.session_state["w_ap_rop"] = to_field("ROP", current["ap_rop_target"])
 st.session_state["w_ap_med"] = float(current["ap_rise_med_pct"])
 st.session_state["w_ap_high"] = float(current["ap_rise_high_pct"])
 st.session_state["w_bit"] = float(current["bit_diameter_in"])
@@ -3061,14 +3148,14 @@ with st.sidebar:
                 _live_target = dict(_live_ap["auto_targets"]) if (_live_ap and _live_ap.get("auto_targets")) else None
                 _live_reason = str(_live_ap.get("auto_reason", "")) if _live_ap else ""
             if _live_target:
-                st.caption(f"WOB: {_live_target['WOB']:.2f} kN | RPM: {_live_target['RPM']:.1f} rpm | Target ROP: {_live_target['ROP']:.2f} m/h")
+                st.caption(f"WOB: {to_field('WOB', _live_target['WOB']):.2f} klb | RPM: {_live_target['RPM']:.1f} rpm | Target ROP: {to_field('ROP', _live_target['ROP']):.2f} min/m")
                 st.caption(_live_reason)
             else:
                 st.caption("Aktifkan Auto-Pilot dan mulai playback untuk melihat target hasil sistem.")
         else:
             st.warning("MODE MANUAL: setpoint berasal dari tiga kolom input operator di bawah.")
             st.number_input(
-                "Setpoint WOB (kN)", min_value=1.0, max_value=200.0, step=0.5,
+                "Setpoint WOB (klb)", min_value=0.1, max_value=100.0, step=0.5,
                 format="%g", key="w_ap_wob", disabled=locked,
                 on_change=update_param, args=("ap_wob_sp", "w_ap_wob"),
             )
@@ -3078,7 +3165,7 @@ with st.sidebar:
                 on_change=update_param, args=("ap_rpm_sp", "w_ap_rpm"),
             )
             st.number_input(
-                "Target ROP (m/h)", min_value=0.5, max_value=100.0, step=0.5,
+                "Target ROP inverse (min/m)", min_value=0.1, max_value=600.0, step=0.1,
                 format="%g", key="w_ap_rop", disabled=locked,
                 on_change=update_param, args=("ap_rop_target", "w_ap_rop"),
             )
@@ -3111,12 +3198,15 @@ with st.sidebar:
         )
 
     with st.expander("Ambang alarm (demonstrasi)"):
+        st.caption("Satuan mengikuti log MLU. Khusus ROP inverse (min/m), nilai semakin "
+                   "KECIL berarti ROP semakin cepat. Ambang kuning > merah > magenta "
+                   "dalam min/m; ini mempertahankan logika alarm ROP tinggi yang sudah ada.")
         for parameter in PARAMETERS:
             st.markdown(f"**{DISPLAY_NAME.get(parameter, parameter)}** ({UNITS[parameter]})")
             cols = st.columns(3)
             for col, (level_name, label) in zip(cols, LEVEL_KEYS):
                 key = f"w_th_{parameter}_{level_name}"
-                st.session_state[key] = float(current["thresholds"][parameter][level_name])
+                st.session_state[key] = to_field(parameter, current["thresholds"][parameter][level_name])
                 col.number_input(
                     label, key=key, disabled=locked,
                     step=THRESHOLD_STEP[parameter], format="%g",
@@ -3125,7 +3215,8 @@ with st.sidebar:
             limits = current["thresholds"][parameter]
             inline_warning(
                 not (limits["yellow"] < limits["red"] < limits["magenta"]),
-                f"{parameter}: urutan harus Kuning < Merah < Magenta",
+                f"{parameter}: batas internal harus Kuning < Merah < Magenta "
+                + ("(pada ROP inverse urutan angkanya terbalik)" if parameter == "ROP" else ""),
             )
 
     with st.expander("Penahan alarm dan laju perubahan"):
@@ -3154,13 +3245,15 @@ with st.sidebar:
             disabled=locked, format_func=lambda x: f"{x} pembacaan terakhir",
             on_change=update_param, args=("roc_window", "w_roc_window"),
         )
-        st.caption("Ambang laju = perubahan per MENIT (naik atau turun).")
+        st.caption("Ambang laju = perubahan per menit pada mode sintetis (bukan perubahan per 0,25 m). "
+                   "Untuk data historis NEAC-001 berindeks kedalaman, ROC berbasis waktu tidak dihitung karena timestamp lapangan tidak tersedia.")
         for parameter in PARAMETERS:
             st.markdown(f"**{DISPLAY_NAME.get(parameter, parameter)}** ({UNITS[parameter]}/mnt)")
             cols = st.columns(2)
             for col, (level_name, label) in zip(cols, ROC_LEVEL_KEYS):
                 key = f"w_roc_{parameter}_{level_name}"
-                st.session_state[key] = float(current["roc_thresholds"][parameter][level_name])
+                st.session_state[key] = (float(current["roc_thresholds"][parameter][level_name]) if parameter == "ROP"
+                                         else to_field(parameter, current["roc_thresholds"][parameter][level_name]))
                 col.number_input(
                     label, key=key, disabled=locked,
                     step=ROC_STEP[parameter], format="%g",
@@ -3363,7 +3456,8 @@ with sec_alerts:
             notice(
                 f"<b>Data lapangan NEAC-001:</b> {n} baris, kedalaman {d_first} sampai {d_last} m "
                 f"({subset_text}). Satuan dikonversi: "
-                "klbf ke kN, lbf.ft ke kN.m, min/m ke m/h. Timestamp adalah indeks playback sintetis "
+                "Tampilan memakai satuan asli MLU (klb, min/m, lbf·ft, psi, rpm); "
+                "mesin kontrol/MSE menghitung pada basis internal yang dikonversi. Timestamp hanyalah playback sintetis "
                 "(1 menit per baris), bukan waktu akuisisi lapangan. Ambang EWS adalah contoh statistik, bukan batas keselamatan rig.",
             ),
             unsafe_allow_html=True,
@@ -3424,7 +3518,7 @@ if view_raw:
         stats = [
             stat_html("Kedalaman TMD", _num(latest.get("Depth_m"), 2), "m", depth_progress),
             stat_html("Kedalaman TVD", _num(latest.get("TVD_m"), 2), "m"),
-            stat_html("Hook load (WOH)", _num(latest.get("WOH"), 1), "kN"),
+            stat_html("Hook load (WOH)", field_text("WOH", latest.get("WOH"), 1), "klb"),
             stat_html("RPM total", _num(latest.get("RPM_total"), 1), "rpm"),
             stat_html("Data diputar", f"{index + 1} / {n}", "", (index + 1) / n * 100.0),
         ]
@@ -3434,7 +3528,7 @@ if view_raw:
         gauges = []
         for parameter in ["WOB", "ROP", "RPM", "Torque", "StandpipePressure"]:
             bad = parameter in bad_sensors
-            rate_text = f"Laju {rates[parameter]:+.1f} per menit" if parameter in rates else "&nbsp;"
+            rate_text = f"Laju {field_roc(parameter, rates[parameter]):+.2f} {UNITS[parameter]}/mnt" if parameter in rates else "&nbsp;"
             gauges.append(
                 gauge_html(
                     parameter,
@@ -3509,14 +3603,14 @@ if view_raw:
             rop_gain = (rop_ap / rop_raw - 1.0) * 100.0 if rop_raw > 0 else 0.0
             boost = float(ap_view["boost"])
             cards_c = [
-                ap_card_html("Perintah WOB", _num(hist["wob_cmd"][-1], 1), "kN",
+                ap_card_html("Perintah WOB", field_text("WOB", hist["wob_cmd"][-1], 1), "klb",
                              "lv1" if boost >= 0.01 else "lv0",
                              f"Booster +{boost * 100:.0f}%" if boost >= 0.01 else "Stabil"),
                 ap_card_html("Perintah RPM", _num(hist["rpm_cmd"][-1], 1), "rpm",
                              brake_css, "Direm" if brake_now >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake_now * 100:.0f}", "%", brake_css, brake_text),
-                ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
-                             "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
+                ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
+                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
             ]
             extra = ""
             if brake_now >= 0.10:
@@ -3592,7 +3686,7 @@ if view_ap:
         stats = [
             stat_html("Kedalaman TMD", _num(latest.get("Depth_m"), 2), "m", depth_progress),
             stat_html("Kedalaman TVD", _num(latest.get("TVD_m"), 2), "m"),
-            stat_html("Hook load (WOH)", _num(latest.get("WOH"), 1), "kN"),
+            stat_html("Hook load (WOH)", field_text("WOH", latest.get("WOH"), 1), "klb"),
             stat_html("Auto pilot", "AKTIF" if ap_on else "NONAKTIF"),
             stat_html("Data diputar", f"{index + 1} / {n}", "", (index + 1) / n * 100.0),
         ]
@@ -3663,8 +3757,8 @@ if view_ap:
             gains = ap_view["gains"]
             cmd_cards = [
                 cmd_card_html(
-                    "Perintah WOB (drawworks)", _num(ref_now["WOB"], 1), "kN", wob_css,
-                    f"Aktual AP {ap_now['WOB']:.1f} kN &middot; mentah {raw_now['WOB']:.1f} kN",
+                    "Perintah WOB (drawworks)", field_text("WOB", ref_now["WOB"], 1), "klb", wob_css,
+                    f"Aktual AP {to_field('WOB', ap_now['WOB']):.1f} klb &middot; mentah {to_field('WOB', raw_now['WOB']):.1f} klb",
                 ),
                 cmd_card_html(
                     "Perintah RPM (top drive)", _num(ref_now["RPM"], 1), "rpm", brake_css,
@@ -3677,11 +3771,11 @@ if view_ap:
                 ),
                 cmd_card_html(
                     "Booster ROP", f"+{boost * 100:.1f}", "%", "lv1" if boost >= 0.01 else "lv0",
-                    f"Maksimum +{AP_MAX_BOOST * 100:.0f}% &middot; target ROP {chosen_sp['ROP']:.1f} m/h",
+                    f"Maksimum +{AP_MAX_BOOST * 100:.0f}% &middot; target ROP {to_field('ROP', chosen_sp['ROP']):.2f} min/m",
                     boost / AP_MAX_BOOST * 100.0,
                 ),
                 cmd_card_html(
-                    "Setpoint WOB", _num(chosen_sp["WOB"], 1), "kN", "lv0",
+                    "Setpoint WOB", field_text("WOB", chosen_sp["WOB"], 1), "klb", "lv0",
                     "Perintah = setpoint &times; (1 + booster) &times; (1 &minus; 0,5 &times; rem)",
                 ),
                 cmd_card_html(
@@ -3689,8 +3783,8 @@ if view_ap:
                     "Perintah = setpoint &times; (1 &minus; 0,7 &times; rem)",
                 ),
                 cmd_card_html(
-                    "ROP hasil auto pilot", _num(ap_now["ROP"], 1), "m/h", "lv0",
-                    f"Target {chosen_sp['ROP']:.1f} m/h &middot; mentah {raw_now['ROP']:.1f} m/h",
+                    "ROP inverse hasil auto pilot", field_text("ROP", ap_now["ROP"], 2), "min/m", "lv0",
+                    f"Target {to_field('ROP', chosen_sp['ROP']):.2f} min/m &middot; mentah {to_field('ROP', raw_now['ROP']):.2f} min/m",
                 ),
                 cmd_card_html(
                     "Gain fuzzy kanal WOB", f"Kp {gains['WOB'][0]:.3f}", "", "lv0",
@@ -3807,14 +3901,14 @@ if not cabin_view:
             rop_gain = (rop_ap / rop_raw - 1.0) * 100.0 if rop_raw > 0 else 0.0
 
             ap_cards = [
-                ap_card_html("Perintah WOB", _num(hist["wob_cmd"][-1], 1), "kN",
+                ap_card_html("Perintah WOB", field_text("WOB", hist["wob_cmd"][-1], 1), "klb",
                              "lv1" if boost >= 0.01 else "lv0",
                              f"Booster +{boost * 100:.0f}%" if boost >= 0.01 else "Stabil"),
                 ap_card_html("Perintah RPM", _num(hist["rpm_cmd"][-1], 1), "rpm",
                              brake_css, "Direm" if brake >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake * 100:.0f}", "%", brake_css, brake_text),
-                ap_card_html("ROP auto pilot", _num(rop_ap, 1), "m/h", "lv0",
-                             "Rata-rata 30 langkah", f"Mentah {rop_raw:.1f}, selisih {rop_gain:+.0f}%"),
+                ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
+                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
             ]
             slot_cards.markdown(
                 _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
@@ -3854,18 +3948,18 @@ if not cabin_view:
             )
 
             kpi_rows = [
-                {"Indikator": "Fluktuasi WOB (rata-rata perubahan per langkah, kN)",
-                 "Data mentah": f"{_mean_abs_change(series('raw_WOB')):.2f}",
-                 "Auto pilot": f"{_mean_abs_change(series('ap_WOB')):.2f}"},
-                {"Indikator": "Fluktuasi ROP (rata-rata perubahan per langkah, m/h)",
-                 "Data mentah": f"{_mean_abs_change(series('raw_ROP')):.2f}",
-                 "Auto pilot": f"{_mean_abs_change(series('ap_ROP')):.2f}"},
-                {"Indikator": "ROP rata-rata (m/h)",
-                 "Data mentah": f"{np.mean(series('raw_ROP')):.2f}",
-                 "Auto pilot": f"{np.mean(series('ap_ROP')):.2f}"},
-                {"Indikator": "Torsi puncak (kN.m)",
-                 "Data mentah": f"{np.max(series('raw_Torque')):.2f}",
-                 "Auto pilot": f"{np.max(series('ap_Torque')):.2f}"},
+                {"Indikator": "Fluktuasi WOB (rata-rata perubahan per sampel, klb)",
+                 "Data mentah": f"{_mean_abs_change(to_field('WOB', series('raw_WOB'))):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(to_field('WOB', series('ap_WOB'))):.2f}"},
+                {"Indikator": "Fluktuasi ROP inverse (rata-rata perubahan per sampel, min/m)",
+                 "Data mentah": f"{_mean_abs_change(to_field('ROP', series('raw_ROP'))):.2f}",
+                 "Auto pilot": f"{_mean_abs_change(to_field('ROP', series('ap_ROP'))):.2f}"},
+                {"Indikator": "ROP inverse rata-rata (min/m)",
+                 "Data mentah": f"{np.mean(to_field('ROP', series('raw_ROP'))):.2f}",
+                 "Auto pilot": f"{np.mean(to_field('ROP', series('ap_ROP'))):.2f}"},
+                {"Indikator": "Torsi puncak (lbf·ft)",
+                 "Data mentah": f"{np.max(to_field('Torque', series('raw_Torque'))):.2f}",
+                 "Auto pilot": f"{np.max(to_field('Torque', series('ap_Torque'))):.2f}"},
                 {"Indikator": "Standpipe pressure puncak (psi)",
                  "Data mentah": f"{np.max(series('raw_StandpipePressure')):,.0f}",
                  "Auto pilot": f"{np.max(series('ap_StandpipePressure')):,.0f}"},
@@ -3994,6 +4088,8 @@ with sec_audit:
 with sec_notes:
     with st.expander("Catatan keselamatan dan keamanan"):
         st.write(
+            "Seluruh angka tampilan dan input menggunakan satuan asli log MLU; "
+            "algoritma Fuzzy-PID dan perhitungan MSE memakai satuan internal terkonversi. "
             "Data dan ambang pada program ini hanya untuk demonstrasi dan analisis offline. "
             "Model tidak memvalidasi kondisi formasi, pipe sticking, kick, loss circulation, "
             "maupun penyebab NPT. Jangan gunakan sebagai pengganti alarm, setpoint, atau "
