@@ -501,6 +501,11 @@ CABIN_CSS = """
 .gauge .g-value{font-size:28px;font-weight:800;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--text)}
 .gauge .g-unit{font-size:12px;font-weight:600;color:var(--muted);margin-left:4px}
 .gauge .g-sub{font-size:11px;color:var(--muted);margin-top:4px}
+.gauge .g-equiv{font-size:12px;font-weight:700;color:var(--accent);margin-top:3px}
+.gauge .g-direction{display:flex;justify-content:space-between;gap:6px;font-size:10px;color:var(--muted);margin:-3px 0 6px}
+.gauge .g-perf{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.35}
+.card .rop-equiv{font-size:12px;color:var(--accent);font-weight:700;margin-top:2px}
+.card .rop-perf{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.3}
 .annun{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
 .lamp{padding:10px 6px;border-radius:4px;text-align:center;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--border);background:var(--surface2);color:var(--muted);min-width:0}
 .lamp.ok{border-color:var(--lv0);color:var(--lv0);background:var(--surface)}
@@ -2122,12 +2127,16 @@ def render_trend_png(cache_key, theme, parameter, limits, x_label, _x, _values):
     name = DISPLAY_NAME.get(parameter, parameter)
     ax.plot(_x, to_field(parameter, _values), color=pal["accent"], linewidth=1.8, label=name)
     shown_limits = display_limits(parameter, limits)
-    ax.axhline(shown_limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label="Kuning")
-    ax.axhline(shown_limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label="Merah")
-    ax.axhline(shown_limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label="Magenta")
+    legend_tag = "Ambang EWS " if parameter == "ROP" else ""
+    ax.axhline(shown_limits["yellow"], color="#D9A400", linestyle="--", linewidth=1, label=legend_tag + "Kuning")
+    ax.axhline(shown_limits["red"], color="#D32F2F", linestyle="--", linewidth=1, label=legend_tag + "Merah")
+    ax.axhline(shown_limits["magenta"], color="#B0158F", linestyle="--", linewidth=1, label=legend_tag + "Magenta")
     ax.set_ylabel(UNITS[parameter], fontsize=9)
     ax.set_xlabel(x_label, fontsize=8)
-    ax.set_title(f"Tren {name}", fontsize=11, loc="left")
+    ax.set_title(
+        "Tren ROP inverse (kecil = cepat, besar = lambat)" if parameter == "ROP"
+        else f"Tren {name}", fontsize=11, loc="left"
+    )
     ax.legend(
         fontsize=7, facecolor=pal["surface"], edgecolor=pal["border"],
         labelcolor=pal["text"], loc="upper left",
@@ -2206,17 +2215,44 @@ def _arc(cx, cy, r, f0, f1):
     return f"M{x0:.2f} {y0:.2f} A{r} {r} 0 0 1 {x1:.2f} {y1:.2f}"
 
 
-def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, ref_value=None, raw_value=None):
+def rop_penetration_trend(rop_now_mh, previous_rop_mh, window=30):
+    """Indikator laju relatif, bukan efisiensi energi, litologi, atau status keselamatan.
+
+    Bandingkan ROP saat ini dengan median maksimum `window` sampel SEBELUMNYA.
+    Keputusan ini hanya dipakai untuk penjelasan HMI, bukan masukan Fuzzy-PID.
+    """
+    try:
+        current = float(rop_now_mh)
+        past = np.asarray(previous_rop_mh if previous_rop_mh is not None else [], dtype=float).ravel()
+        past = past[-int(window):]
+        past = past[np.isfinite(past) & (past > 0)]
+        if not (np.isfinite(current) and current > 0) or len(past) < 5:
+            return "Tren ROP: data pembanding belum cukup"
+        median = float(np.median(past))
+        if median <= 0:
+            return "Tren ROP: data pembanding belum cukup"
+        ratio = current / median
+        if ratio >= 1.10:
+            status = "Lebih cepat dari tren"
+        elif ratio <= 0.90:
+            status = "Lebih lambat dari tren"
+        else:
+            status = "Sejalan dengan tren"
+        return f"Tren ROP: {status} (median {len(past)} sampel sebelumnya)"
+    except (TypeError, ValueError, OverflowError):
+        return "Tren ROP: data pembanding belum cukup"
+
+
+def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, ref_value=None, raw_value=None, rop_history=None):
     """Satu gauge setengah lingkaran dengan zona hijau/kuning/merah/magenta."""
     name = SHORT_NAME[parameter]
     decimals = DECIMALS[parameter]
     css = "lverr" if bad else f"lv{level}"
-    # Semua koordinat jarum/ambang menggunakan satuan aslinya.
-    # ROP inverse: semakin kecil min/m, semakin cepat penetrasi. Karena
-    # ambang EWS awal berbasis ROP tinggi (m/h), zona dibalik secara geometris.
+    # ROP inverse: makin kecil min/m, makin cepat penetrasi.
+    # Skala performa pada busur HARUS terpisah dari status EWS keselamatan.
     shown_limits = display_limits(parameter, limits)
     if parameter == "ROP":
-        vmax = max(shown_limits["yellow"] * 2.0, 0.1)
+        vmax = max(shown_limits["yellow"] * 3.0, 5.0)
     else:
         vmax = float(shown_limits["magenta"]) * 1.2
     cx, cy, radius = 100.0, 100.0, 78.0
@@ -2225,12 +2261,8 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
         return min(max(float(v) / vmax, 0.0), 1.0)
 
     if parameter == "ROP":
-        zones = [
-            (0.0, frac(shown_limits["magenta"]), "var(--lv3)"),
-            (frac(shown_limits["magenta"]), frac(shown_limits["red"]), "var(--lv2)"),
-            (frac(shown_limits["red"]), frac(shown_limits["yellow"]), "var(--lv1)"),
-            (frac(shown_limits["yellow"]), 1.0, "var(--lv0)"),
-        ]
+        # Busur NETRAL. Jangan menyamakan ROP cepat/lambat dengan alarm keselamatan.
+        zones = [(0.0, 1.0, "var(--muted)")]
     else:
         zones = [
             (0.0, frac(shown_limits["yellow"]), "var(--lv0)"),
@@ -2296,6 +2328,22 @@ def gauge_html(parameter, value, limits, level, bad, rate_text, ap_value=None, r
         + "</svg>"
     )
     chip_text = "SENSOR ERROR" if bad else LEVELS[level]["name"]
+    if parameter == "ROP":
+        # Status EWS tetap mengikuti aturan alarm asli, namun diberi label terpisah.
+        direction = '<div class="g-direction"><span>← Lebih cepat</span><span>Lebih lambat →</span></div>'
+        equivalent = (
+            f'<div class="g-equiv">Setara {_num(value, 2)} m/h</div>'
+            if not bad and value is not None and np.isfinite(float(value))
+            else '<div class="g-equiv">Setara - m/h</div>'
+        )
+        trend = rop_penetration_trend(value, rop_history) if not bad else "Tren ROP: sensor tidak valid"
+        return (
+            f'<div class="gauge {css}"><div class="g-label">ROP inverse</div>{svg}'
+            f'{direction}<div class="g-value">{shown}<span class="g-unit">min/m</span></div>'
+            f'{equivalent}<div class="chip {css}">EWS: {chip_text}</div>'
+            f'<div class="g-perf">{html.escape(trend)}</div>'
+            f'<div class="g-sub">{rate_text}</div></div>'
+        )
     return (
         f'<div class="gauge {css}"><div class="g-label">{name}</div>{svg}'
         f'<div class="g-value">{shown}<span class="g-unit">{UNITS[parameter]}</span></div>'
@@ -2358,9 +2406,16 @@ def strip_html(parameter, raw_values, ap_values, limits, css, ref_values=None, p
     if ap_arr is not None:
         body += polyline(ap_arr, "var(--accent)", 2.4 if primary_ap else 2.2, 1)
     svg = f'<svg viewBox="0 0 {width:.0f} {height:.0f}" preserveAspectRatio="none">{body}</svg>'
+    rop_note = ""
+    if parameter == "ROP" and len(shown_series):
+        mh = float(np.asarray(raw_values if not primary_ap or ap_values is None else ap_values)[-1])
+        if np.isfinite(mh) and mh > 0:
+            # `shown_series` telah dikonversi ke min/m; kembalikan untuk ekuivalensi.
+            equiv = 60.0 / mh
+            rop_note = f'<div class="g-sub">Setara {equiv:.2f} m/h &middot; kecil = cepat</div>'
     return (
         f'<div class="strip {css}"><div class="s-head"><span class="s-name">{name}</span>'
-        f'<span class="s-val">{last} {UNITS[parameter]}</span></div>{svg}</div>'
+        f'<span class="s-val">{last} {UNITS[parameter]}</span></div>{svg}{rop_note}</div>'
     )
 
 
@@ -2748,6 +2803,7 @@ def rig_autopilot_gauges_markup(ap_view, params):
         gauges.append(gauge_html(
             parameter, ap_value, thresholds[parameter], level,
             False, subtitle, None, ref_now.get(parameter), raw_value,
+            hist["ap_ROP"][-31:-1] if parameter == "ROP" else None,
         ))
     legend = (
         '<div class="rig-gauge-legend">'
@@ -2761,7 +2817,7 @@ def rig_autopilot_gauges_markup(ap_view, params):
     )
 
 
-def rig_ews_telemetry_markup(latest, snap):
+def rig_ews_telemetry_markup(latest, snap, visible):
     """Kartu monitoring EWS yang semula di bawah rig, kini berada di kolom kanannya."""
     params = snap["params"]
     thresholds = params["thresholds"]
@@ -2788,10 +2844,25 @@ def rig_ews_telemetry_markup(latest, snap):
                 else f'<span class="chip lv{roc_lv}">{LEVELS[roc_lv]["name"]}</span>'
             )
             rate_html = f'<div class="card-rate">Laju {field_roc(parameter, rates[parameter]):+.2f} {UNITS[parameter]}/mnt {roc_chip}</div>'
+        rop_details = ""
+        if parameter == "ROP":
+            if parameter in bad_sensors:
+                rop_details = '<div class="rop-equiv">Setara - m/h</div>'
+                rop_trend = "Tren ROP: sensor tidak valid"
+            else:
+                rop_details = f'<div class="rop-equiv">Setara {_num(latest[parameter], 2)} m/h</div>'
+                history = visible["ROP"].iloc[max(0, len(visible) - 31):-1].to_numpy(dtype=float)
+                rop_trend = rop_penetration_trend(latest[parameter], history)
+            rop_details += f'<div class="rop-perf">{html.escape(rop_trend)} &middot; kecil = cepat, besar = lambat</div>'
+            chip = (
+                '<div class="chip lverr">EWS: Sensor error</div>'
+                if parameter in bad_sensors else
+                f'<div class="chip {css}">EWS: {LEVELS[signal_levels.get(parameter, 0)]["name"]}</div>'
+            )
         cards.append(
             f'<div class="card {css}"><div class="card-label">{name}</div>'
             f'<div class="card-value">{value_text}<span class="card-unit">{UNITS[parameter]}</span></div>'
-            f"{chip}{rate_html}</div>"
+            f"{rop_details}{chip}{rate_html}</div>"
         )
     return (
         '<div class="rig-card rig-telemetry-card"><div class="rig-k">Monitoring telemetri</div>'
@@ -2910,7 +2981,7 @@ def build_rig_markup(view, visible, simulation_data, latest, params, ap_view, ha
     if view == "Kabin Auto Pilot":
         right_panel = rig_autopilot_gauges_markup(ap_view, params)
     else:
-        right_panel = rig_ews_telemetry_markup(latest, ews_snapshot) if ews_snapshot else ""
+        right_panel = rig_ews_telemetry_markup(latest, ews_snapshot, visible) if ews_snapshot else ""
 
     # Formasi selalu berada di atas panel khusus mode. Tabel lama tetap tersedia
     # tetapi dipindahkan sesudah grid agar tidak mengosongkan atau memperpanjang sisi rig.
@@ -3538,6 +3609,7 @@ if view_raw:
                     bad,
                     rate_text,
                     ap_last[parameter] if (ap_last and ap_on) else None,
+                    rop_history=visible["ROP"].iloc[max(0, len(visible) - 31):-1].to_numpy(dtype=float) if parameter == "ROP" else None,
                 )
             )
         slot_gauges.markdown(_h('<div class="cabin-gauges">' + "".join(gauges) + "</div>"), unsafe_allow_html=True)
@@ -3610,7 +3682,7 @@ if view_raw:
                              brake_css, "Direm" if brake_now >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake_now * 100:.0f}", "%", brake_css, brake_text),
                 ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
-                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
+                             "Rata-rata 30 langkah", f"Setara {rop_ap:.2f} m/h &middot; mentah {to_field('ROP', rop_raw):.2f} min/m &middot; selisih ROP {rop_gain:+.0f}%"),
             ]
             extra = ""
             if brake_now >= 0.10:
@@ -3784,7 +3856,7 @@ if view_ap:
                 ),
                 cmd_card_html(
                     "ROP inverse hasil auto pilot", field_text("ROP", ap_now["ROP"], 2), "min/m", "lv0",
-                    f"Target {to_field('ROP', chosen_sp['ROP']):.2f} min/m &middot; mentah {to_field('ROP', raw_now['ROP']):.2f} min/m",
+                    f"Setara {ap_now['ROP']:.2f} m/h &middot; target {to_field('ROP', chosen_sp['ROP']):.2f} min/m &middot; mentah {to_field('ROP', raw_now['ROP']):.2f} min/m",
                 ),
                 cmd_card_html(
                     "Gain fuzzy kanal WOB", f"Kp {gains['WOB'][0]:.3f}", "", "lv0",
@@ -3908,7 +3980,7 @@ if not cabin_view:
                              brake_css, "Direm" if brake >= 0.10 else "Normal"),
                 ap_card_html("Pengereman", f"{brake * 100:.0f}", "%", brake_css, brake_text),
                 ap_card_html("ROP inverse auto pilot", field_text("ROP", rop_ap, 2), "min/m", "lv0",
-                             "Rata-rata 30 langkah", f"Mentah {to_field('ROP', rop_raw):.2f} min/m, selisih ROP {rop_gain:+.0f}%"),
+                             "Rata-rata 30 langkah", f"Setara {rop_ap:.2f} m/h &middot; mentah {to_field('ROP', rop_raw):.2f} min/m &middot; selisih ROP {rop_gain:+.0f}%"),
             ]
             slot_cards.markdown(
                 _h('<div class="grid-cards four">' + "".join(ap_cards) + "</div>"),
