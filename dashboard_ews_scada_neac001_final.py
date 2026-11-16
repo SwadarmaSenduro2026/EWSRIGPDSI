@@ -431,14 +431,10 @@ div.stButton>button,div.stDownloadButton>button{border-radius:4px;border:1px sol
 .status-progress>div{height:100%;background:#fff;border-radius:3px}
 .status-panel.lv1 .status-progress{background:rgba(0,0,0,.18)}
 .status-panel.lv1 .status-progress>div{background:#1b1400}
-/* Penjelasan asal alarm EWS, tampak di ketiga dashboard. */
-.status-origin-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:12px}
-.status-origin-cell{min-width:0;padding:10px 12px;border:1px solid rgba(255,255,255,.38);border-radius:4px;background:rgba(255,255,255,.11);overflow-wrap:anywhere}
-.status-panel.lv1 .status-origin-cell{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.24)}
-.status-origin-label{font-size:10px;letter-spacing:.10em;text-transform:uppercase;font-weight:800;opacity:.84;margin-bottom:4px}
-.status-origin-value{font-size:13px;line-height:1.4;font-weight:700}
-.status-origin-note{font-size:11px;font-weight:500;line-height:1.45;margin-top:4px;opacity:.88}
-@media(max-width:700px){.status-origin-grid{grid-template-columns:1fr}.status-origin-cell{padding:9px 11px}}
+/* Ringkasan satu baris sumber EWS dan parameter pemicu (tanpa 4 panel). */
+.status-origin-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 20px;margin-top:9px;font-size:12px;line-height:1.4;letter-spacing:.01em}
+.status-origin-line span{display:inline-block;overflow-wrap:anywhere}
+.status-origin-line b{font-weight:800}
 
 .section-title,.side-title{font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
 .section-title{font-size:12px;margin:22px 0 10px;padding-bottom:6px}
@@ -3525,121 +3521,56 @@ messages = {
 }
 
 def ews_origin_markup(snap, latest, ap_view):
-    """Asal EWS global dan indikator AP dipisahkan tanpa mengubah evaluasi/alarm.
+    """Ringkasan sumber EWS global: dashboard pemantau + nama parameter pemicu.
 
-    EWS global: get_signals/evaluate memakai nilai telemetri dari source.
-    AP lokal: level_for() pada hasil simulasi, tanpa memicu EWS global/ACK.
+    Level global tetap berasal dari telemetri historis/skenario, bukan dari
+    output simulasi Kabin Auto Pilot. Fungsi ini hanya membuat markup.
     """
-    sig = snap.get("signal_levels") or {}
-    rates = snap.get("rates") or {}
-    bad = snap.get("bad_sensors") or []
+    levels = snap.get("signal_levels") or {}
     faults = snap.get("fault_keys") or set()
-    params_now = snap.get("params") or {}
-    current_level = int(snap.get("level") or 0)
+    bad = snap.get("bad_sensors") or []
 
-    # Hanya sinyal yang status EWS-nya aktif setelah debounce/hysteresis.
-    raised = sorted(
-        ((str(name), int(lv)) for name, lv in sig.items() if int(lv) > 0),
-        key=lambda entry: (-entry[1], entry[0]),
+    # Hanya sinyal yang memang dinyatakan aktif oleh evaluator EWS setelah
+    # debounce/hysteresis; jangan membandingkan ulang dengan setpoint PID.
+    active = sorted(
+        ((str(key), int(lv)) for key, lv in levels.items() if int(lv) > 0),
+        key=lambda item: (-item[1], item[0]),
     )
-    reasons = []
-    for key_name, lv in raised:
-        if key_name.endswith(ROC_SUFFIX):
-            base_name = key_name[:-len(ROC_SUFFIX)]
-            raw_rate = rates.get(base_name)
-            if base_name not in PARAMETERS:
+    triggered = []
+    for key, _ in active:
+        if key.endswith(ROC_SUFFIX):
+            name = key[:-len(ROC_SUFFIX)]
+            if name not in PARAMETERS:
                 continue
-            if raw_rate is None or not np.isfinite(float(raw_rate)):
-                detail = f"{SHORT_NAME[base_name]}: perubahan laju"
-            else:
-                detail = (
-                    f"{SHORT_NAME[base_name]}: laju "
-                    f"{field_roc(base_name, float(raw_rate)):+.2f} {UNITS[base_name]}/menit"
-                )
-        elif key_name in PARAMETERS:
-            value = latest.get(key_name)
-            detail = (
-                f"{SHORT_NAME[key_name]} {field_text(key_name, value, DECIMALS[key_name])} "
-                f"{UNITS[key_name]}"
-            )
+            label = f"{SHORT_NAME.get(name, name)} (laju)"
+        elif key in PARAMETERS:
+            label = SHORT_NAME.get(key, key)
         else:
             continue
-        reasons.append(f"{detail} ({LEVELS[lv]['name']})")
+        if label not in triggered:
+            triggered.append(label)
 
-    if snap.get("stale"):
-        origin = "Gangguan aliran data telemetri"
-        involved = "Data terlambat; pembacaan EWS tidak dapat dipercaya"
-        locations = "Kabin Driller, Kabin Auto Pilot, dan Dasbor EWS"
-    elif faults and (bad or "STALE" in faults):
-        origin = "Gangguan kualitas data telemetri"
-        fault_names = ", ".join(SHORT_NAME.get(x, x) for x in bad)
-        involved = (f"Sensor tidak valid: {fault_names}" if bad else "Gangguan data terdeteksi")
-        locations = "Kabin Driller, Kabin Auto Pilot, dan Dasbor EWS"
+    if snap.get("stale") or "STALE" in faults:
+        source = "Telemetri (semua dashboard)"
+        cause = "Data terlambat"
+    elif bad:
+        source = "Telemetri (semua dashboard)"
+        names = ", ".join(SHORT_NAME.get(name, name) for name in bad)
+        cause = f"Sensor tidak valid: {names}"
+        if triggered:
+            cause += " · " + ", ".join(triggered)
     else:
-        origin = "Telemetri historis rig / data skenario"
-        if current_level > 0:
-            involved = "; ".join(reasons[:4]) or "Status peringatan telemetri aktif"
-            if len(reasons) > 4:
-                involved += f"; +{len(reasons)-4} sinyal lainnya"
-        else:
-            involved = "Tidak ada parameter telemetri dengan peringatan EWS aktif"
-        locations = "Kabin Driller dan Dasbor EWS"
-
-    # Tidak ada EWS tersendiri per halaman: yang berbeda adalah sumber nilai lokal.
-    ap_info = "Auto Pilot NONAKTIF"
-    ap_details = "Keluaran model tidak sedang diperbarui; tidak menjadi sumber EWS global."
-    if snap.get("ap_on") and ap_view and ap_view.get("hist"):
-        hist = ap_view["hist"]
-        active_ap = []
-        for name in PARAMETERS:
-            history = hist.get(f"ap_{name}") or []
-            if not history:
-                continue
-            value = float(history[-1])
-            if not np.isfinite(value):
-                continue
-            lv = level_for(value, params_now["thresholds"][name])
-            if lv > 0:
-                active_ap.append((lv, name, value))
-        if active_ap:
-            active_ap.sort(key=lambda x: (-x[0], x[1]))
-            ap_level = active_ap[0][0]
-            ap_info = f"{LEVELS[ap_level]['name']} — hasil simulasi"
-            ap_details = "; ".join(
-                f"{SHORT_NAME[name]} {field_text(name, value, DECIMALS[name])} {UNITS[name]}"
-                for _, name, value in active_ap[:3]
-            )
-            if len(active_ap) > 3:
-                ap_details += f"; +{len(active_ap)-3} kanal"
-            ap_details += ". Ini indikator lokal, bukan pemicu alarm global."
-        else:
-            ap_info = "HIJAU — hasil simulasi"
-            ap_details = "Semua kanal model masih di bawah ambang demonstrasi; bukan sumber alarm EWS global."
-    elif snap.get("ap_on"):
-        ap_info = "Auto Pilot AKTIF — menunggu data model"
-        ap_details = "Belum ada respons simulasi untuk dibandingkan."
-
-    def cell(label, value, note=""):
-        extra = f'<div class="status-origin-note">{html.escape(note)}</div>' if note else ""
-        return (
-            '<div class="status-origin-cell">'
-            f'<div class="status-origin-label">{html.escape(label)}</div>'
-            f'<div class="status-origin-value">{html.escape(value)}</div>'
-            f'{extra}</div>'
-        )
+        # Kabin Driller & Dasbor EWS membaca sumber data rig yang sama.
+        # Output Auto Pilot hanyalah indikator simulasi lokal (bukan pemicu global).
+        source = "Kabin Driller / Dasbor EWS"
+        cause = ", ".join(triggered) if triggered else "Tidak ada"
 
     return (
-        '<div class="status-origin-grid">'
-        + cell("Sumber status EWS global", origin,
-               "Satu sumber telemetri yang sama dipantau pada semua halaman.")
-        + cell("Periksa parameter di dashboard", locations,
-               "Bukan tiga alarm EWS berbeda; tampilan berbagi status yang sama.")
-        + cell("Parameter / kondisi pemicu", involved,
-               "Level mengikuti ambang EWS, bukan selisih terhadap setpoint Auto Pilot.")
-        + cell("Kabin Auto Pilot (indikator lokal)", ap_info, ap_details)
-        + '</div>'
+        '<div class="status-origin-line">'
+        f'<span><b>Sumber:</b> {html.escape(source)}</span>'
+        f'<span><b>{"Gangguan" if (snap.get("stale") or bad or "STALE" in faults) else "Anomali"}:</b> {html.escape(cause)}</span>'
+        '</div>'
     )
-
 
 # ---------------------------- STATUS ----------------------------
 with sec_status:
